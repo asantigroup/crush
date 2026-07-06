@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+
+name: build-binaries
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+          GOEXPERIMENT: greenteagc
+        run: |
+          version=$(git describe --tags --always 2>/dev/null || echo "${GITHUB_SHA}")
+          output="crush_${GOOS}_${GOARCH}"
+          if [ "${GOOS}" = "windows" ]; then
+            output="${output}.exe"
+          fi
+          go build -trimpath \
+            -ldflags="-s -w -X github.com/charmbracelet/crush/internal/version.Version=${version}" \
+            -o "${output}" .
+          echo "built ${output}"
+          ls -lh "${output}"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crush-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: crush_${{ matrix.goos }}_${{ matrix.goarch }}*
+          if-no-files-found: error
