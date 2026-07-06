@@ -6,10 +6,9 @@ on:
   push:
     branches:
       - main
+    tags:
+      - v*.*.*
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 concurrency:
   group: build-binaries-${{ github.ref }}
@@ -17,6 +16,9 @@ concurrency:
 
 jobs:
   binaries:
+    permissions:
+      actions: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -65,3 +67,22 @@ jobs:
           name: crush-${{ matrix.goos }}-${{ matrix.goarch }}
           path: crush_${{ matrix.goos }}_${{ matrix.goarch }}*
           if-no-files-found: error
+
+  release:
+    permissions:
+      actions: read
+      contents: write
+    needs: binaries
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
