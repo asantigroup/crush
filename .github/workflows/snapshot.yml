@@ -14,6 +14,8 @@ concurrency:
 
 jobs:
   snapshot:
+    # This job needs Charm's self-hosted runners and signing secrets.
+    if: github.repository == 'charmbracelet/crush'
     runs-on:
       # Use our own large runners with more CPU and RAM for faster builds
       group: releasers
