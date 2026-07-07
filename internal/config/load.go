@@ -33,7 +33,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const defaultCatwalkURL = "https://catwalk.charm.land"
+const defaultCatwalkURL = "https://catwalk.asanti.dev"
 
 // Load loads the configuration from the default paths and returns a
 // ConfigStore that owns both the pure-data Config and all runtime state.
