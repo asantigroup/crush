@@ -34,7 +34,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-const defaultCatwalkURL = "https://catwalk.charm.land"
+const defaultCatwalkURL = "https://catwalk.asanti.dev"
 
 // legacyProviderTypes maps provider type values from the catwalk v2
 // schema onto the v3 endpoint types that describe the same API format, so
