@@ -13,6 +13,11 @@ concurrency:
 
 jobs:
   goreleaser:
+    if: github.repository == 'charmbracelet/crush'
+    permissions:
+      contents: write
+      id-token: write
+      packages: write
     uses: charmbracelet/meta/.github/workflows/goreleaser.yml@main
     with:
       go_version: "1.26"
