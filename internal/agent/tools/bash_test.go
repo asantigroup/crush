@@ -117,7 +117,7 @@ func (m *recordingPermissionService) SubscribeNotifications(ctx context.Context)
 func newBashToolForTest(workingDir string) fantasy.AgentTool {
 	permissions := &mockBashPermissionService{Broker: pubsub.NewBroker[permission.PermissionRequest]()}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(permissions, workingDir, attribution, "test-model")
+	return NewBashTool(permissions, workingDir, attribution, "test-model", nil)
 }
 
 func newBashToolWithRecordingPerms(workingDir string, allow bool) (fantasy.AgentTool, *recordingPermissionService) {
@@ -126,7 +126,7 @@ func newBashToolWithRecordingPerms(workingDir string, allow bool) (fantasy.Agent
 		allow:  allow,
 	}
 	attribution := &config.Attribution{TrailerStyle: config.TrailerStyleNone}
-	return NewBashTool(perms, workingDir, attribution, "test-model"), perms
+	return NewBashTool(perms, workingDir, attribution, "test-model", nil), perms
 }
 
 func TestBashTool_ChainedCommandsRequirePermission(t *testing.T) {
@@ -210,4 +210,199 @@ func TestTruncateOutputEmoji(t *testing.T) {
 	out := TruncateOutput(content)
 	require.True(t, utf8.ValidString(out), "truncated output must stay valid UTF-8")
 	require.Contains(t, out, "lines truncated")
+}
+
+func TestParseAllowedCommands(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		entries []string
+		want    []parsedAllowedEntry
+	}{
+		{
+			name:    "empty input",
+			entries: nil,
+			want:    []parsedAllowedEntry{},
+		},
+		{
+			name:    "bare command",
+			entries: []string{"sudo"},
+			want:    []parsedAllowedEntry{{cmd: "sudo"}},
+		},
+		{
+			name:    "command with args",
+			entries: []string{"apt-get install"},
+			want:    []parsedAllowedEntry{{cmd: "apt-get", args: []string{"install"}}},
+		},
+		{
+			name:    "command with flags",
+			entries: []string{"npm install -g"},
+			want:    []parsedAllowedEntry{{cmd: "npm", args: []string{"install"}, flags: []string{"-g"}}},
+		},
+		{
+			name:    "flag with value stripped to name",
+			entries: []string{"npm install --prefix=/foo"},
+			want:    []parsedAllowedEntry{{cmd: "npm", args: []string{"install"}, flags: []string{"--prefix"}}},
+		},
+		{
+			name:    "empty string skipped",
+			entries: []string{"", "sudo"},
+			want:    []parsedAllowedEntry{{cmd: "sudo"}},
+		},
+		{
+			name:    "whitespace-only skipped",
+			entries: []string{"   ", "sudo"},
+			want:    []parsedAllowedEntry{{cmd: "sudo"}},
+		},
+		{
+			name:    "multiple entries",
+			entries: []string{"sudo", "curl", "apt-get install"},
+			want: []parsedAllowedEntry{
+				{cmd: "sudo"},
+				{cmd: "curl"},
+				{cmd: "apt-get", args: []string{"install"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseAllowedCommands(tt.entries)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestIsArgBlockAllowed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		rule    argBlockRule
+		allowed []parsedAllowedEntry
+		want    bool
+	}{
+		{
+			name:    "empty allowed list",
+			rule:    argBlockRule{cmd: "npm", args: []string{"install"}, flags: []string{"-g"}},
+			allowed: nil,
+			want:    false,
+		},
+		{
+			name:    "bare command exempts all rules for that command",
+			rule:    argBlockRule{cmd: "go", args: []string{"test"}, flags: []string{"-exec"}},
+			allowed: []parsedAllowedEntry{{cmd: "go"}},
+			want:    true,
+		},
+		{
+			name:    "cmd+args no flags exempts all flag combos",
+			rule:    argBlockRule{cmd: "npm", args: []string{"install"}, flags: []string{"--global"}},
+			allowed: []parsedAllowedEntry{{cmd: "npm", args: []string{"install"}}},
+			want:    true,
+		},
+		{
+			name:    "cmd+args+flags exempts matching rule only",
+			rule:    argBlockRule{cmd: "npm", args: []string{"install"}, flags: []string{"-g"}},
+			allowed: []parsedAllowedEntry{{cmd: "npm", args: []string{"install"}, flags: []string{"-g"}}},
+			want:    true,
+		},
+		{
+			name:    "cmd+args+flags does not exempt non-matching flag rule",
+			rule:    argBlockRule{cmd: "npm", args: []string{"install"}, flags: []string{"--global"}},
+			allowed: []parsedAllowedEntry{{cmd: "npm", args: []string{"install"}, flags: []string{"-g"}}},
+			want:    false,
+		},
+		{
+			name:    "non-matching command not exempted",
+			rule:    argBlockRule{cmd: "npm", args: []string{"install"}, flags: []string{"-g"}},
+			allowed: []parsedAllowedEntry{{cmd: "sudo"}},
+			want:    false,
+		},
+		{
+			name:    "non-matching args not exempted",
+			rule:    argBlockRule{cmd: "go", args: []string{"test"}, flags: []string{"-exec"}},
+			allowed: []parsedAllowedEntry{{cmd: "go", args: []string{"install"}}},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isArgBlockAllowed(tt.rule, tt.allowed)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBlockFuncs_Default(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs(nil)
+	require.True(t, anyBlocked(funcs, []string{"curl", "https://example.com"}))
+	require.True(t, anyBlocked(funcs, []string{"sudo", "ls"}))
+	require.True(t, anyBlocked(funcs, []string{"apt-get", "install", "foo"}))
+	require.True(t, anyBlocked(funcs, []string{"npm", "install", "-g", "foo"}))
+	require.False(t, anyBlocked(funcs, []string{"echo", "hello"}))
+	require.False(t, anyBlocked(funcs, []string{"npm", "install", "foo"}))
+}
+
+func TestBlockFuncs_AllowedBareCommand(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs([]string{"sudo"})
+	require.False(t, anyBlocked(funcs, []string{"sudo", "ls"}))
+	require.True(t, anyBlocked(funcs, []string{"curl", "https://example.com"}))
+}
+
+func TestBlockFuncs_AllowedMultipleBareCommands(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs([]string{"sudo", "curl", "wget"})
+	require.False(t, anyBlocked(funcs, []string{"sudo", "ls"}))
+	require.False(t, anyBlocked(funcs, []string{"curl", "https://example.com"}))
+	require.False(t, anyBlocked(funcs, []string{"wget", "https://example.com"}))
+	require.True(t, anyBlocked(funcs, []string{"ssh", "user@host"}))
+}
+
+func TestBlockFuncs_AllowedArgCommand(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs([]string{"apt-get install"})
+	require.False(t, anyBlocked(funcs, []string{"apt-get", "install", "foo"}))
+	require.True(t, anyBlocked(funcs, []string{"apt", "install", "foo"}))
+}
+
+func TestBlockFuncs_AllowedArgAllFlags(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs([]string{"npm install"})
+	require.False(t, anyBlocked(funcs, []string{"npm", "install", "-g", "foo"}))
+	require.False(t, anyBlocked(funcs, []string{"npm", "install", "--global", "foo"}))
+	require.False(t, anyBlocked(funcs, []string{"npm", "install", "foo"}))
+}
+
+func TestBlockFuncs_AllowedArgSpecificFlag(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs([]string{"npm install -g"})
+	require.False(t, anyBlocked(funcs, []string{"npm", "install", "-g", "foo"}))
+	require.True(t, anyBlocked(funcs, []string{"npm", "install", "--global", "foo"}))
+}
+
+func TestBlockFuncs_AllowedBareCommandExemptsArgRules(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs([]string{"go"})
+	require.False(t, anyBlocked(funcs, []string{"go", "install", "foo"}))
+	require.False(t, anyBlocked(funcs, []string{"go", "test", "-exec", "foo"}))
+}
+
+func TestBlockFuncs_AllowedBashCommandDoesNotAffectOthers(t *testing.T) {
+	t.Parallel()
+	funcs := blockFuncs([]string{"sudo"})
+	require.True(t, anyBlocked(funcs, []string{"apt-get", "install", "foo"}))
+	require.True(t, anyBlocked(funcs, []string{"npm", "install", "-g", "foo"}))
+}
+
+func anyBlocked(funcs []shell.BlockFunc, args []string) bool {
+	for _, f := range funcs {
+		if f(args) {
+			return true
+		}
+	}
+	return false
 }

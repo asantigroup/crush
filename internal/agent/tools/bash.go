@@ -9,10 +9,12 @@ import (
 	"html/template"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/exp/slice"
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/config"
@@ -145,8 +147,129 @@ var bannedCommands = []string{
 	"ufw",
 }
 
-func bashDescription(attribution *config.Attribution, modelID string) string {
-	bannedCommandsStr := strings.Join(bannedCommands, ", ")
+// argBlockRule defines an argument-based block rule.
+type argBlockRule struct {
+	cmd   string
+	args  []string
+	flags []string
+}
+
+// argBlockRules is the list of subcommand/flag combinations that are
+// blocked even when the base command is not fully banned.
+var argBlockRules = []argBlockRule{
+	// System package managers.
+	{cmd: "apk", args: []string{"add"}},
+	{cmd: "apt", args: []string{"install"}},
+	{cmd: "apt-get", args: []string{"install"}},
+	{cmd: "dnf", args: []string{"install"}},
+	{cmd: "pacman", flags: []string{"-S"}},
+	{cmd: "pkg", args: []string{"install"}},
+	{cmd: "yum", args: []string{"install"}},
+	{cmd: "zypper", args: []string{"install"}},
+
+	// Language-specific package managers.
+	{cmd: "brew", args: []string{"install"}},
+	{cmd: "cargo", args: []string{"install"}},
+	{cmd: "gem", args: []string{"install"}},
+	{cmd: "go", args: []string{"install"}},
+	{cmd: "npm", args: []string{"install"}, flags: []string{"--global"}},
+	{cmd: "npm", args: []string{"install"}, flags: []string{"-g"}},
+	{cmd: "pip", args: []string{"install"}, flags: []string{"--user"}},
+	{cmd: "pip3", args: []string{"install"}, flags: []string{"--user"}},
+	{cmd: "pnpm", args: []string{"add"}, flags: []string{"--global"}},
+	{cmd: "pnpm", args: []string{"add"}, flags: []string{"-g"}},
+	{cmd: "yarn", args: []string{"global", "add"}},
+
+	// `go test -exec` can run arbitrary commands.
+	{cmd: "go", args: []string{"test"}, flags: []string{"-exec"}},
+}
+
+// parsedAllowedEntry is a parsed entry from the allowed_bash_commands
+// config option.
+type parsedAllowedEntry struct {
+	cmd   string
+	args  []string
+	flags []string
+}
+
+// parseAllowedCommands parses allowed_bash_commands entries into
+// (cmd, args, flags) triples. Each entry is split on whitespace; the
+// first token is the command, tokens starting with "-" are flags, and
+// the rest are positional args.
+func parseAllowedCommands(entries []string) []parsedAllowedEntry {
+	parsed := make([]parsedAllowedEntry, 0, len(entries))
+	for _, entry := range entries {
+		parts := strings.Fields(entry)
+		if len(parts) == 0 {
+			continue
+		}
+		cmd := parts[0]
+		var args, flags []string
+		for _, p := range parts[1:] {
+			if strings.HasPrefix(p, "-") {
+				flag := p
+				if before, _, ok := strings.Cut(p, "="); ok {
+					flag = before
+				}
+				flags = append(flags, flag)
+			} else {
+				args = append(args, p)
+			}
+		}
+		parsed = append(parsed, parsedAllowedEntry{cmd: cmd, args: args, flags: flags})
+	}
+	return parsed
+}
+
+// allowedCommandSet returns the set of commands that appear in any
+// allowed entry (bare or with arguments). These commands are removed
+// from the fully-banned list, since allowing a subcommand implies the
+// base command itself should not be blanket-blocked.
+func allowedCommandSet(allowed []parsedAllowedEntry) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, a := range allowed {
+		set[a.cmd] = struct{}{}
+	}
+	return set
+}
+
+// isArgBlockAllowed reports whether an argument block rule is exempted
+// by the allowed entries. A rule is exempted if a bare command entry
+// matches (e.g. "go" exempts all "go" rules), if a matching cmd+args
+// entry with no flags exempts all flag combos, or if a matching
+// cmd+args entry whose flags are a superset of the rule's flags exempts
+// that specific combination.
+func isArgBlockAllowed(rule argBlockRule, allowed []parsedAllowedEntry) bool {
+	for _, a := range allowed {
+		if a.cmd != rule.cmd {
+			continue
+		}
+		if len(a.args) == 0 && len(a.flags) == 0 {
+			return true
+		}
+		if !slices.Equal(a.args, rule.args) {
+			continue
+		}
+		if len(a.flags) == 0 {
+			return true
+		}
+		if slice.IsSubset(rule.flags, a.flags) {
+			return true
+		}
+	}
+	return false
+}
+
+func bashDescription(attribution *config.Attribution, modelID string, allowedBashCommands []string) string {
+	allowed := parseAllowedCommands(allowedBashCommands)
+	allowedCmds := allowedCommandSet(allowed)
+	filteredBanned := make([]string, 0, len(bannedCommands))
+	for _, cmd := range bannedCommands {
+		if _, ok := allowedCmds[cmd]; !ok {
+			filteredBanned = append(filteredBanned, cmd)
+		}
+	}
+	bannedCommandsStr := strings.Join(filteredBanned, ", ")
 	var out bytes.Buffer
 	if err := bashDescriptionTpl.Execute(&out, bashDescriptionData{
 		BannedCommands:  bannedCommandsStr,
@@ -162,42 +285,35 @@ func bashDescription(attribution *config.Attribution, modelID string) string {
 	return out.String()
 }
 
-func blockFuncs() []shell.BlockFunc {
-	return []shell.BlockFunc{
-		shell.CommandsBlocker(bannedCommands),
+func blockFuncs(allowedBashCommands []string) []shell.BlockFunc {
+	allowed := parseAllowedCommands(allowedBashCommands)
+	allowedCmds := allowedCommandSet(allowed)
 
-		// System package managers
-		shell.ArgumentsBlocker("apk", []string{"add"}, nil),
-		shell.ArgumentsBlocker("apt", []string{"install"}, nil),
-		shell.ArgumentsBlocker("apt-get", []string{"install"}, nil),
-		shell.ArgumentsBlocker("dnf", []string{"install"}, nil),
-		shell.ArgumentsBlocker("pacman", nil, []string{"-S"}),
-		shell.ArgumentsBlocker("pkg", []string{"install"}, nil),
-		shell.ArgumentsBlocker("yum", []string{"install"}, nil),
-		shell.ArgumentsBlocker("zypper", []string{"install"}, nil),
-
-		// Language-specific package managers
-		shell.ArgumentsBlocker("brew", []string{"install"}, nil),
-		shell.ArgumentsBlocker("cargo", []string{"install"}, nil),
-		shell.ArgumentsBlocker("gem", []string{"install"}, nil),
-		shell.ArgumentsBlocker("go", []string{"install"}, nil),
-		shell.ArgumentsBlocker("npm", []string{"install"}, []string{"--global"}),
-		shell.ArgumentsBlocker("npm", []string{"install"}, []string{"-g"}),
-		shell.ArgumentsBlocker("pip", []string{"install"}, []string{"--user"}),
-		shell.ArgumentsBlocker("pip3", []string{"install"}, []string{"--user"}),
-		shell.ArgumentsBlocker("pnpm", []string{"add"}, []string{"--global"}),
-		shell.ArgumentsBlocker("pnpm", []string{"add"}, []string{"-g"}),
-		shell.ArgumentsBlocker("yarn", []string{"global", "add"}, nil),
-
-		// `go test -exec` can run arbitrary commands
-		shell.ArgumentsBlocker("go", []string{"test"}, []string{"-exec"}),
+	filteredBanned := make([]string, 0, len(bannedCommands))
+	for _, cmd := range bannedCommands {
+		if _, ok := allowedCmds[cmd]; !ok {
+			filteredBanned = append(filteredBanned, cmd)
+		}
 	}
+
+	funcs := []shell.BlockFunc{
+		shell.CommandsBlocker(filteredBanned),
+	}
+
+	for _, rule := range argBlockRules {
+		if isArgBlockAllowed(rule, allowed) {
+			continue
+		}
+		funcs = append(funcs, shell.ArgumentsBlocker(rule.cmd, rule.args, rule.flags))
+	}
+
+	return funcs
 }
 
-func NewBashTool(permissions permission.Service, workingDir string, attribution *config.Attribution, modelID string) fantasy.AgentTool {
+func NewBashTool(permissions permission.Service, workingDir string, attribution *config.Attribution, modelID string, allowedBashCommands []string) fantasy.AgentTool {
 	return fantasy.NewAgentTool(
 		BashToolName,
-		string(bashDescription(attribution, modelID)),
+		string(bashDescription(attribution, modelID, allowedBashCommands)),
 		func(ctx context.Context, params BashParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
 			if params.Command == "" {
 				return fantasy.NewTextErrorResponse("missing command"), nil
@@ -251,7 +367,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 				bgManager := shell.GetBackgroundShellManager()
 				bgManager.Cleanup()
 				// Use background context so it continues after tool returns
-				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+				bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(allowedBashCommands), params.Command, params.Description)
 				if err != nil {
 					return fantasy.ToolResponse{}, fmt.Errorf("error starting background shell: %w", err)
 				}
@@ -306,7 +422,7 @@ func NewBashTool(permissions permission.Service, workingDir string, attribution 
 			// Start with detached context so it can survive if moved to background
 			bgManager := shell.GetBackgroundShellManager()
 			bgManager.Cleanup()
-			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(), params.Command, params.Description)
+			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(allowedBashCommands), params.Command, params.Description)
 			if err != nil {
 				return fantasy.ToolResponse{}, fmt.Errorf("error starting shell: %w", err)
 			}

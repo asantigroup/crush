@@ -188,6 +188,7 @@ reviewed.
   "options": {
     "skills_paths": ["./skills"],
     "disabled_tools": ["bash", "sourcegraph"],
+    "allowed_bash_commands": ["sudo", "curl", "apt-get install"],
     "disabled_skills": ["crush-config"],
     "tui": {
       "compact_mode": false,
@@ -209,7 +210,28 @@ reviewed.
 > The following skill paths are loaded by default and DO NOT NEED to be added to `skills_paths`:
 > `.agents/skills`, `.crush/skills`, `.claude/skills`, `.cursor/skills`
 
-Other options: `context_paths`, `progress`, `disable_notifications`, `disable_auto_summarize`, `disable_metrics`, `disable_provider_auto_update`, `disable_default_providers`, `data_directory`, `initialize_as`.
+Other options: `context_paths`, `progress`, `disable_notifications`, `disable_auto_summarize`, `disable_metrics`, `disable_provider_auto_update`, `disable_default_providers`, `data_directory`, `initialize_as`, `allowed_bash_commands`.
+
+### Allowed Bash Commands
+
+The bash tool blocks a set of potentially dangerous commands (e.g.
+`sudo`, `curl`, `apt-get`) and subcommands (e.g. `npm install -g`,
+`pip install --user`). Use `allowed_bash_commands` to exempt specific
+commands from this block list:
+
+- **Bare command** (e.g. `"sudo"`): unblocks the command entirely.
+- **Command with args** (e.g. `"apt-get install"`): unblocks that
+  subcommand and all flag combinations of it (e.g. `apt-get install -y`).
+- **Command with args and flags** (e.g. `"npm install -g"`): unblocks
+  only that specific subcommand/flag combination.
+
+```json
+{
+  "options": {
+    "allowed_bash_commands": ["sudo", "curl", "apt-get install", "npm install -g"]
+  }
+}
+```
 
 ## User-Invocable Skills
 
