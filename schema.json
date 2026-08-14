@@ -510,6 +510,18 @@
           "type": "array",
           "description": "List of built-in tools to disable and hide from the agent"
         },
+        "allowed_bash_commands": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "sudo",
+              "curl",
+              "apt-get install"
+            ]
+          },
+          "type": "array",
+          "description": "List of commands to exempt from the bash tool's built-in block list. Bare names (e.g. sudo, curl) unblock the command entirely; names with arguments (e.g. apt-get install, npm install -g) unblock that specific subcommand/flag combination."
+        },
         "disable_provider_auto_update": {
           "type": "boolean",
           "description": "Disable providers auto-update",

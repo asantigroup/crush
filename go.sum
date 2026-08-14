@@ -56,8 +56,8 @@ github.com/andybalholm/cascadia v1.3.3 h1:AG2YHrzJIm4BZ19iwJ/DAua6Btl3IwJX+VI4kk
 github.com/andybalholm/cascadia v1.3.3/go.mod h1:xNd9bqTn98Ln4DwST8/nG+H0yuB8Hmgu1YHNnWw0GeA=
 github.com/anthropics/anthropic-sdk-go v1.63.0 h1:GNl6LVjjxg1bRY41nlrvL5FvlwQs7FbYgQ3DnoVITD4=
 github.com/anthropics/anthropic-sdk-go v1.63.0/go.mod h1:3EfIfmFqxH6rbiLcIP4tPFyXL/IHakx2wDG4OU+TIEI=
-github.com/asantigroup/catwalk v0.0.0-20260706065405-847855423e54 h1:+6BOVRh4KH+k1gNwIjbYj4aC/m3ZbiSrp30XsOcmPUg=
-github.com/asantigroup/catwalk v0.0.0-20260706065405-847855423e54/go.mod h1:bw6/oiChsa9Fkr8LgYn84KrbbJY2z1+m7Jmlmmv3B2A=
+github.com/asantigroup/catwalk v0.0.0-20260708090622-07272a77f794 h1:Er1vMcUXsS53N3o9avogvcbSt9hT2IzoaD38+gE2m5U=
+github.com/asantigroup/catwalk v0.0.0-20260708090622-07272a77f794/go.mod h1:bw6/oiChsa9Fkr8LgYn84KrbbJY2z1+m7Jmlmmv3B2A=
 github.com/atotto/clipboard v0.1.4 h1:EH0zSVneZPSuFR11BlR9YppQTVDbh5+16AmcJi4g1z4=
 github.com/atotto/clipboard v0.1.4/go.mod h1:ZY9tmq7sm5xIbd9bOK4onWV4S6X0u6GY7Vn0Yu86PYI=
 github.com/aws/aws-sdk-go-v2 v1.43.4 h1:b9FTvbRwy+JCsfp2Wp6wV/KbOx3Aj7nkoFb2cRX0IhE=
