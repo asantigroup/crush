@@ -338,28 +338,29 @@ func TestIsArgBlockAllowed(t *testing.T) {
 func TestBlockFuncs_Default(t *testing.T) {
 	t.Parallel()
 	funcs := blockFuncs(nil)
-	require.True(t, anyBlocked(funcs, []string{"curl", "https://example.com"}))
-	require.True(t, anyBlocked(funcs, []string{"sudo", "ls"}))
+	require.True(t, anyBlocked(funcs, []string{"chrome", "https://example.com"}))
+	require.True(t, anyBlocked(funcs, []string{"ip", "addr"}))
 	require.True(t, anyBlocked(funcs, []string{"apt-get", "install", "foo"}))
 	require.True(t, anyBlocked(funcs, []string{"npm", "install", "-g", "foo"}))
 	require.False(t, anyBlocked(funcs, []string{"echo", "hello"}))
+	require.False(t, anyBlocked(funcs, []string{"ssh", "user@host"}))
 	require.False(t, anyBlocked(funcs, []string{"npm", "install", "foo"}))
 }
 
 func TestBlockFuncs_AllowedBareCommand(t *testing.T) {
 	t.Parallel()
-	funcs := blockFuncs([]string{"sudo"})
-	require.False(t, anyBlocked(funcs, []string{"sudo", "ls"}))
-	require.True(t, anyBlocked(funcs, []string{"curl", "https://example.com"}))
+	funcs := blockFuncs([]string{"chrome"})
+	require.False(t, anyBlocked(funcs, []string{"chrome", "https://example.com"}))
+	require.True(t, anyBlocked(funcs, []string{"apt-get", "install", "foo"}))
 }
 
 func TestBlockFuncs_AllowedMultipleBareCommands(t *testing.T) {
 	t.Parallel()
-	funcs := blockFuncs([]string{"sudo", "curl", "wget"})
-	require.False(t, anyBlocked(funcs, []string{"sudo", "ls"}))
-	require.False(t, anyBlocked(funcs, []string{"curl", "https://example.com"}))
-	require.False(t, anyBlocked(funcs, []string{"wget", "https://example.com"}))
-	require.True(t, anyBlocked(funcs, []string{"ssh", "user@host"}))
+	funcs := blockFuncs([]string{"chrome", "firefox", "ip"})
+	require.False(t, anyBlocked(funcs, []string{"chrome", "https://example.com"}))
+	require.False(t, anyBlocked(funcs, []string{"firefox", "https://example.com"}))
+	require.False(t, anyBlocked(funcs, []string{"ip", "addr"}))
+	require.True(t, anyBlocked(funcs, []string{"apt-get", "install", "foo"}))
 }
 
 func TestBlockFuncs_AllowedArgCommand(t *testing.T) {
@@ -393,7 +394,7 @@ func TestBlockFuncs_AllowedBareCommandExemptsArgRules(t *testing.T) {
 
 func TestBlockFuncs_AllowedBashCommandDoesNotAffectOthers(t *testing.T) {
 	t.Parallel()
-	funcs := blockFuncs([]string{"sudo"})
+	funcs := blockFuncs([]string{"chrome"})
 	require.True(t, anyBlocked(funcs, []string{"apt-get", "install", "foo"}))
 	require.True(t, anyBlocked(funcs, []string{"npm", "install", "-g", "foo"}))
 }
