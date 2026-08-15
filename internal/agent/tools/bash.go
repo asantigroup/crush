@@ -76,31 +76,16 @@ type bashDescriptionData struct {
 }
 
 var bannedCommands = []string{
-	// Network/Download tools
+	// Shell builtins
 	"alias",
-	"aria2c",
-	"axel",
+
+	// Browsers
 	"chrome",
-	"curl",
-	"curlie",
 	"firefox",
-	"http-prompt",
-	"httpie",
 	"links",
 	"lynx",
-	"nc",
 	"safari",
-	"scp",
-	"ssh",
-	"telnet",
 	"w3m",
-	"wget",
-	"xh",
-
-	// System administration
-	"doas",
-	"su",
-	"sudo",
 
 	// Package managers
 	"apk",
@@ -123,19 +108,6 @@ var bannedCommands = []string{
 	"yay",
 	"yum",
 	"zypper",
-
-	// System modification
-	"at",
-	"batch",
-	"chkconfig",
-	"crontab",
-	"fdisk",
-	"mkfs",
-	"mount",
-	"parted",
-	"service",
-	"systemctl",
-	"umount",
 
 	// Network configuration
 	"firewall-cmd",
