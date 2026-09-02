@@ -394,6 +394,15 @@ func (m *Models) setProviderItems() error {
 					selectedItemID = item.ID()
 				}
 			}
+			// A model-less provider that is kept for OAuth login gets a
+			// placeholder item so it appears in the picker; selecting it
+			// triggers authentication instead of model selection.
+			if len(p.Models) == 0 && p.BaseURL != "" && p.APIKey == "" && p.OAuthToken == nil {
+				placeholder := catwalk.Model{ID: AuthenticateModelID, Name: "Authenticate to discover models"}
+				item := NewModelItem(t, provider, placeholder, m.modelType, false)
+				group.AppendItems(item)
+				itemsMap[item.ID()] = item
+			}
 			if len(group.Items) > 0 {
 				groups = append(groups, group)
 			}

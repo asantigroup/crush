@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/crush/internal/client"
@@ -85,7 +87,7 @@ crush logout copilot
 		case "copilot", "github", "github-copilot":
 			return logoutCopilot(c, ws.ID)
 		default:
-			return fmt.Errorf("unknown platform: %s", provider)
+			return logoutDiscovered(c, ws.ID, provider)
 		}
 	},
 }
@@ -131,19 +133,27 @@ func pickLoggedInProvider(c *client.Client, wsID string) (string, error) {
 		name string
 	}
 
-	// Only OAuth-based providers support login/logout. Keep this list in sync
-	// with the switch in RunE and the login command.
-	oauthProviders := map[string]string{
+	// Any provider holding an OAuth token supports logout, including
+	// discovery-driven OAuth providers.
+	knownNames := map[string]string{
 		"hyper":   "Hyper",
 		"copilot": "GitHub Copilot",
 	}
 
 	var loggedIn []loggedInProvider
-	for id, name := range oauthProviders {
-		if p, ok := cfg.Providers.Get(id); ok && p.OAuthToken != nil {
-			loggedIn = append(loggedIn, loggedInProvider{id: id, name: name})
+	for id, pc := range cfg.Providers.Copy() {
+		if pc.OAuthToken == nil {
+			continue
 		}
+		name, ok := knownNames[id]
+		if !ok {
+			name = cmp.Or(pc.Name, id)
+		}
+		loggedIn = append(loggedIn, loggedInProvider{id: id, name: name})
 	}
+	slices.SortFunc(loggedIn, func(a, b loggedInProvider) int {
+		return strings.Compare(a.id, b.id)
+	})
 
 	if len(loggedIn) == 0 {
 		fmt.Println(logoutPromptStyle.Render("You are not logged in to any platform."))
@@ -168,6 +178,22 @@ func pickLoggedInProvider(c *client.Client, wsID string) (string, error) {
 	}
 
 	return loggedIn[choice-1].id, nil
+}
+
+// logoutDiscovered removes the stored OAuth credentials of any provider,
+// including discovery-driven OAuth providers.
+func logoutDiscovered(c *client.Client, wsID, providerID string) error {
+	ctx := getLogoutContext()
+
+	if err := cmp.Or(
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, fmt.Sprintf("providers.%s.api_key", providerID)),
+		c.RemoveConfigField(ctx, wsID, config.ScopeGlobal, fmt.Sprintf("providers.%s.oauth", providerID)),
+	); err != nil {
+		return err
+	}
+
+	fmt.Println(logoutHeaderStyle.Render(fmt.Sprintf("Successfully logged out of %s.", providerID)))
+	return nil
 }
 
 func init() {

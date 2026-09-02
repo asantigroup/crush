@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth"
 	"github.com/charmbracelet/crush/internal/oauth/copilot"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
+	"github.com/charmbracelet/crush/internal/oidc"
 	"github.com/charmbracelet/crush/internal/workspace"
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
@@ -23,13 +25,19 @@ var loginCmd = &cobra.Command{
 	Short:   "Login Crush to a platform",
 	Long: `Login Crush to a specified platform.
 The platform should be provided as an argument.
-Available platforms are: hyper, copilot.`,
+Built-in platforms are: hyper, copilot.
+Any other configured provider also works when its host serves OAuth
+authorization server metadata (RFC 8414): crush discovers the server,
+registers itself as an OAuth client, and opens the browser for you.`,
 	Example: `
 # Authenticate with Charm Hyper
 crush login
 
 # Authenticate with GitHub Copilot
 crush login copilot
+
+# Authenticate with a discovery-driven OAuth provider
+crush login golem
 
 # Force re-authentication even if already logged in
 crush login -f copilot
@@ -59,13 +67,15 @@ crush login -f copilot
 		case "copilot", "github", "github-copilot":
 			return loginCopilot(ws, force)
 		default:
-			return fmt.Errorf("unknown platform: %s", args[0])
+			noBrowser, _ := cmd.Flags().GetBool("no-browser")
+			return loginDiscovered(ws, provider, force, noBrowser)
 		}
 	},
 }
 
 func init() {
 	loginCmd.Flags().BoolP("force", "f", false, "Force re-authentication even if already logged in")
+	loginCmd.Flags().Bool("no-browser", false, "Print the authorization URL instead of opening a browser")
 }
 
 func loginHyper(ws workspace.Workspace, force bool) error {
@@ -205,6 +215,55 @@ func loginCopilot(ws workspace.Workspace, force bool) error {
 
 	fmt.Println()
 	fmt.Println("You're now authenticated with GitHub Copilot!")
+	return nil
+}
+
+// loginDiscovered authenticates against any configured provider whose
+// host publishes OAuth authorization server metadata. Everything is
+// derived from the provider's base URL: the authorization server is
+// discovered (RFC 8414), the client registers itself (RFC 7591), and the
+// code flow runs with PKCE over a loopback redirect, degrading to a
+// printed URL plus pasted code (or device flow) when no browser exists.
+func loginDiscovered(ws workspace.Workspace, providerID string, force, noBrowser bool) error {
+	ctx := getLoginContext()
+
+	cfg := ws.Config()
+	pc, ok := cfg.Providers.Get(providerID)
+	if !ok {
+		return fmt.Errorf("unknown platform or provider: %s", providerID)
+	}
+	if !force && pc.OAuthToken != nil {
+		fmt.Printf("You are already logged in to %s.\nUse --force to re-authenticate.\n", providerID)
+		return nil
+	}
+	if pc.BaseURL == "" {
+		return fmt.Errorf("provider %s has no base URL to discover an OAuth server from", providerID)
+	}
+
+	opts := oidc.Options{
+		APIBaseURL: pc.BaseURL,
+		NoBrowser:  noBrowser,
+		Stdin:      os.Stdin,
+		Stdout:     os.Stdout,
+	}
+	// Reuse the client registered by a previous login to avoid churn.
+	if pc.OAuthToken != nil && pc.OAuthToken.Client != nil {
+		opts.ClientID = pc.OAuthToken.Client.ClientID
+		opts.ClientSecret = pc.OAuthToken.Client.ClientSecret
+	}
+
+	fmt.Printf("Discovering OAuth server for %s...\n", providerID)
+	token, err := oidc.Login(ctx, opts)
+	if err != nil {
+		return err
+	}
+
+	if err := ws.SetProviderAPIKey(config.ScopeGlobal, providerID, token); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Printf("You're now authenticated with %s!\n", cmp.Or(pc.Name, providerID))
 	return nil
 }
 
