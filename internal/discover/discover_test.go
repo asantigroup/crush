@@ -39,6 +39,61 @@ func TestDiscoverModels(t *testing.T) {
 	require.Equal(t, "model-b", models[1].ID)
 }
 
+func TestDiscoverModels_ParsesModelMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"object": "list",
+			"data": [
+				{
+					"id": "reasoning-model",
+					"object": "model",
+					"name": "Reasoning Model",
+					"context_length": 1048576,
+					"default_max_tokens": 32768,
+					"can_reason": true,
+					"reasoning_levels": ["low", "medium", "high"],
+					"pricing": {"input": 1.4, "output": 4.4}
+				},
+				{
+					"id": "plain-model",
+					"object": "model",
+					"context_length": 262144,
+					"max_output_tokens": 8192,
+					"can_reason": false
+				}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		ID:      "test",
+		BaseURL: server.URL + "/v1",
+		APIKey:  "test-key",
+	}
+
+	models, err := DiscoverModels(context.Background(), cfg, &mockResolver{})
+	require.NoError(t, err)
+	require.Len(t, models, 2)
+
+	require.Equal(t, "reasoning-model", models[0].ID)
+	require.Equal(t, "Reasoning Model", models[0].Name)
+	require.Equal(t, int64(1048576), models[0].ContextWindow)
+	require.Equal(t, int64(32768), models[0].DefaultMaxTokens)
+	require.True(t, models[0].CanReason)
+	require.Equal(t, []string{"low", "medium", "high"}, models[0].ReasoningLevels)
+	require.Equal(t, 1.4, models[0].CostPer1MIn)
+	require.Equal(t, 4.4, models[0].CostPer1MOut)
+
+	require.Equal(t, "plain-model", models[1].ID)
+	require.Equal(t, "plain-model", models[1].Name)
+	require.Equal(t, int64(262144), models[1].ContextWindow)
+	require.Equal(t, int64(8192), models[1].DefaultMaxTokens)
+	require.False(t, models[1].CanReason)
+	require.Empty(t, models[1].ReasoningLevels)
+}
+
 func TestDiscoverModels_ExistingModelsWin(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -90,13 +90,35 @@ type Resolver interface {
 	ResolveValue(val string) (string, error)
 }
 
+// modelPricing holds the per-1M-token pricing fields that some
+// OpenAI-compatible providers include in the /v1/models response.
+type modelPricing struct {
+	Input  *float64 `json:"input"`
+	Output *float64 `json:"output"`
+}
+
+// modelEntry is a single entry in the /v1/models listing response.
+// Beyond the standard OpenAI fields (id, object, created, owned_by),
+// many OpenAI-compatible providers expose extra metadata such as
+// context_length, pricing, and reasoning capability. We parse every
+// field we understand so discovered models carry real metadata instead
+// of zero values.
+type modelEntry struct {
+	ID               string        `json:"id"`
+	Object           string        `json:"object"`
+	Created          int64         `json:"created"`
+	OwnedBy          string        `json:"owned_by"`
+	Name             string        `json:"name"`
+	ContextLength    *int64        `json:"context_length"`
+	MaxOutputTokens  *int64        `json:"max_output_tokens"`
+	DefaultMaxTokens *int64        `json:"default_max_tokens"`
+	CanReason        *bool         `json:"can_reason"`
+	ReasoningLevels  []string      `json:"reasoning_levels"`
+	Pricing          *modelPricing `json:"pricing"`
+}
+
 type modelsResponse struct {
-	Data []struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		Created int64  `json:"created"`
-		OwnedBy string `json:"owned_by"`
-	} `json:"data"`
+	Data []modelEntry `json:"data"`
 }
 
 // DiscoverModels fetches available models from the provider's /models endpoint.
@@ -130,15 +152,43 @@ func DiscoverModels(ctx context.Context, cfg Config, resolver Resolver) ([]catwa
 	result := make([]catwalk.Model, len(cfg.ExistingModels))
 	copy(result, cfg.ExistingModels)
 
-	// Append discovered models not already in the list.
+	// Append discovered models not already in the list, populating any
+	// metadata the provider included in the listing response.
 	for _, e := range modelsResp.Data {
 		if _, ok := existing[e.ID]; ok {
 			continue
 		}
-		result = append(result, catwalk.Model{
+		name := e.Name
+		if name == "" {
+			name = e.ID
+		}
+		m := catwalk.Model{
 			ID:   e.ID,
-			Name: e.ID,
-		})
+			Name: name,
+		}
+		if e.ContextLength != nil && *e.ContextLength > 0 {
+			m.ContextWindow = *e.ContextLength
+		}
+		if e.DefaultMaxTokens != nil && *e.DefaultMaxTokens > 0 {
+			m.DefaultMaxTokens = *e.DefaultMaxTokens
+		} else if e.MaxOutputTokens != nil && *e.MaxOutputTokens > 0 {
+			m.DefaultMaxTokens = *e.MaxOutputTokens
+		}
+		if e.CanReason != nil {
+			m.CanReason = *e.CanReason
+		}
+		if len(e.ReasoningLevels) > 0 {
+			m.ReasoningLevels = e.ReasoningLevels
+		}
+		if e.Pricing != nil {
+			if e.Pricing.Input != nil {
+				m.CostPer1MIn = *e.Pricing.Input
+			}
+			if e.Pricing.Output != nil {
+				m.CostPer1MOut = *e.Pricing.Output
+			}
+		}
+		result = append(result, m)
 	}
 
 	return result, nil
