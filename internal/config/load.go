@@ -389,14 +389,21 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			if config.OAuthToken != nil {
 				break
 			}
-			// if the provider api or endpoint are missing we skip them
+			// If the provider has no API key but has a base URL, it may
+			// be an OAuth-capable provider (like golem) that authenticates
+			// via discovery-driven login rather than a static key. Keep it
+			// around so it shows up in the model picker for authentication.
 			v, err := resolver.ResolveValue(p.APIKey)
 			if v == "" || err != nil {
-				if configExists {
+				if isOAuthLoginCandidate(prepared) {
+					slog.Info("Keeping provider for OAuth login (no API key, has base URL)", "provider", p.ID)
+				} else if configExists {
 					slog.Warn("Skipping provider due to missing API key", "provider", p.ID)
 					c.Providers.Del(string(p.ID))
+					continue
+				} else {
+					continue
 				}
-				continue
 			}
 		}
 		c.Providers.Set(string(p.ID), prepared)
@@ -490,7 +497,7 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 		if result, ok := discoveryResults[id]; ok {
 			if result.err != nil {
 				slog.Warn("Model discovery failed", "provider", id, "error", result.err)
-				if len(providerConfig.Models) == 0 {
+				if len(providerConfig.Models) == 0 && !isOAuthLoginCandidate(providerConfig) {
 					slog.Warn("Skipping provider with no models after failed discovery", "provider", id)
 					c.Providers.Del(id)
 					continue
@@ -501,7 +508,7 @@ func (c *Config) configureProviders(ctx context.Context, store *ConfigStore, env
 			}
 		}
 
-		if len(providerConfig.Models) == 0 {
+		if len(providerConfig.Models) == 0 && !isOAuthLoginCandidate(providerConfig) {
 			slog.Warn("Skipping custom provider because the provider has no models", "provider", id)
 			c.Providers.Del(id)
 			continue
@@ -548,6 +555,19 @@ func (c *Config) applyEnv(resolver VariableResolver) {
 		}
 		os.Setenv(k, resolved)
 	}
+}
+
+// isOAuthLoginCandidate reports whether a custom provider, even without
+// models, should be kept around so it stays selectable in the UI and can be
+// authenticated from there. A provider that is already logged in (has an
+// OAuth token, its models just not discovered yet) qualifies, as does one
+// with no static API key but a base URL, where authentication must come from
+// a login rather than the config.
+func isOAuthLoginCandidate(pc ProviderConfig) bool {
+	if pc.OAuthToken != nil {
+		return true
+	}
+	return pc.BaseURL != "" && pc.APIKey == ""
 }
 
 // NormalizeOptions allocates Options and Options.TUI and fills in the option

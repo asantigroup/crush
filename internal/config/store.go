@@ -21,6 +21,7 @@ import (
 	"github.com/charmbracelet/crush/internal/oauth/grok"
 	"github.com/charmbracelet/crush/internal/oauth/hyper"
 	"github.com/charmbracelet/crush/internal/oauth/openai"
+	"github.com/charmbracelet/crush/internal/oidc"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/sync/singleflight"
@@ -1072,6 +1073,12 @@ func (s *ConfigStore) exchange(ctx context.Context, providerID, refreshToken str
 	case hyperp.Name:
 		return hyper.ExchangeToken(ctx, refreshToken)
 	default:
+		// Any other provider with a stored OAuth token logged in through
+		// discovery-driven OAuth refreshes with the client state captured
+		// at login time.
+		if pc, ok := s.Config().Providers.Get(providerID); ok && pc.OAuthToken != nil {
+			return oidc.RefreshToken(ctx, pc.OAuthToken, pc.BaseURL)
+		}
 		return nil, fmt.Errorf("OAuth refresh not supported for provider %s", providerID)
 	}
 }

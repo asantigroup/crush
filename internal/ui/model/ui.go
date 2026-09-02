@@ -2774,9 +2774,35 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 	var (
 		providerID   = msg.Model.Provider
 		isCopilot    = providerID == string(catwalk.InferenceProviderCopilot)
-		isConfigured = func() bool { _, ok := cfg.Providers.Get(providerID); return ok }
+		isConfigured = func() bool {
+			pc, ok := cfg.Providers.Get(providerID)
+			if !ok {
+				return false
+			}
+			// A provider is only "configured" when it has credentials to
+			// make API calls. A catwalk-served provider that was kept
+			// for OAuth login (no key, no token) is not yet configured.
+			return pc.APIKey != "" || pc.OAuthToken != nil
+		}
 		isOnboarding = m.state == uiOnboarding
 	)
+
+	// Selecting the authenticate placeholder either starts the OAuth flow
+	// (when no token exists yet) or reopens the picker (when auth just
+	// completed and models are now available).
+	if msg.Model.Model == dialog.AuthenticateModelID {
+		pc, ok := cfg.Providers.Get(providerID)
+		if !ok || (pc.OAuthToken == nil && pc.APIKey == "") {
+			m.dialog.CloseDialog(dialog.ModelsID)
+			if cmd := m.openAuthenticationDialog(msg.Provider, msg.Model, msg.ModelType); cmd != nil {
+				return cmd
+			}
+			return nil
+		}
+		// Auth just completed; reopen the models dialog with discovered models.
+		m.dialog.CloseDialog(dialog.OAuthID)
+		return m.openModelsDialog()
+	}
 
 	// For Hyper, if the stored OAuth token is expired, try a silent
 	// refresh before deciding whether the provider is configured. Keeps
@@ -2952,7 +2978,14 @@ func (m *UI) openAuthenticationDialog(provider catwalk.Provider, model config.Se
 			dlg, cmd = dialog.NewAPIKeyInput(m.com, isOnboarding, provider, model, modelType)
 		}
 	default:
-		dlg, cmd = dialog.NewAPIKeyInput(m.com, isOnboarding, provider, model, modelType)
+		// A custom provider with a base URL is routed through the
+		// discovery-driven OAuth flow (RFC 8414 + DCR + PKCE). Providers
+		// without a base URL fall back to manual API key entry.
+		if pc, ok := m.com.Config().Providers.Get(string(provider.ID)); ok && pc.BaseURL != "" {
+			dlg, cmd = dialog.NewOAuthDiscovered(m.com, isOnboarding, provider, model, modelType)
+		} else {
+			dlg, cmd = dialog.NewAPIKeyInput(m.com, isOnboarding, provider, model, modelType)
+		}
 	}
 
 	if m.dialog.ContainsDialog(dlg.ID()) {

@@ -22,6 +22,9 @@ type OAuthClient struct {
 	AuthURL      string `json:"auth_url,omitempty"`
 	TokenURL     string `json:"token_url,omitempty"`
 	AuthStyle    int    `json:"auth_style,omitempty"`
+	// Resources are RFC 8707 resource indicators the token must be
+	// scoped to, learned from the API's protected-resource metadata.
+	Resources []string `json:"resources,omitempty"`
 }
 
 // Token represents an OAuth2 token.
