@@ -81,6 +81,21 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Package linux archives and checksums
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for arch in amd64 arm64; do
+            case "${arch}" in
+              amd64) asset_arch="x86_64" ;;
+              *) asset_arch="${arch}" ;;
+            esac
+            mkdir -p stage/crush
+            cp "artifacts/crush_linux_${arch}" stage/crush/crush
+            chmod +x stage/crush/crush
+            tar -czf "artifacts/crush_${version}_Linux_${asset_arch}.tar.gz" -C stage crush
+            rm -rf stage
+          done
+          (cd artifacts && sha256sum ./* > checksums.txt)
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
