@@ -95,7 +95,7 @@ jobs:
             tar -czf "artifacts/crush_${version}_Linux_${asset_arch}.tar.gz" -C stage crush
             rm -rf stage
           done
-          (cd artifacts && sha256sum ./* > checksums.txt)
+          (cd artifacts && sha256sum -- * > checksums.txt)
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
