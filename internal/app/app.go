@@ -50,6 +50,9 @@ type UpdateAvailableMsg struct {
 	CurrentVersion string
 	LatestVersion  string
 	IsDevelopment  bool
+	// SelfUpdated is true when the running binary was already replaced
+	// in place; a restart is needed to run the new version.
+	SelfUpdated bool
 }
 
 type App struct {
@@ -947,7 +950,8 @@ func (app *App) Shutdown() {
 	wg.Wait()
 }
 
-// checkForUpdates checks for available updates.
+// checkForUpdates checks for available updates and, when eligible,
+// self-upgrades the running binary in the background.
 func (app *App) checkForUpdates(ctx context.Context) {
 	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -956,9 +960,25 @@ func (app *App) checkForUpdates(ctx context.Context) {
 	if err != nil || !info.Available() {
 		return
 	}
+
+	// Self-update is best-effort: development builds, unsupported
+	// platforms, and failures fall back to the notify-only behavior.
+	var selfUpdated bool
+	if !info.IsDevelopment() && !app.config.Config().Options.DisableAutoUpdate {
+		installCtx, installCancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer installCancel()
+		info, err = update.Install(installCtx, info, update.Default)
+		if err != nil {
+			slog.Warn("Self-update failed", "error", err)
+		} else {
+			selfUpdated = info.Upgraded
+		}
+	}
+
 	app.events.Publish(pubsub.UpdatedEvent, UpdateAvailableMsg{
 		CurrentVersion: info.Current,
 		LatestVersion:  info.Latest,
 		IsDevelopment:  info.IsDevelopment(),
+		SelfUpdated:    selfUpdated,
 	})
 }

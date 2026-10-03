@@ -963,6 +963,25 @@ Or set the `CRUSH_DISABLE_PROVIDER_AUTO_UPDATE` environment variable:
 export CRUSH_DISABLE_PROVIDER_AUTO_UPDATE=1
 ```
 
+### Disabling automatic upgrades
+
+On Linux, Crush downloads new releases in the background, verifies their
+checksum, and replaces its own binary in place; a restart applies the
+upgrade. To keep the notify-only behavior instead, disable it in your
+`crushrc`:
+
+```bash
+option auto-update false
+```
+
+Or set the `CRUSH_DISABLE_AUTO_UPDATE` environment variable:
+
+```bash
+export CRUSH_DISABLE_AUTO_UPDATE=1
+```
+
+You can also upgrade manually at any time with `crush upgrade`.
+
 ### Manually updating providers
 
 Manually updating providers is possible with the `crush update-providers`

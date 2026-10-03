@@ -51,6 +51,9 @@ type UpdateAvailable struct {
 	CurrentVersion string `json:"current_version"`
 	LatestVersion  string `json:"latest_version"`
 	IsDevelopment  bool   `json:"is_development"`
+	// SelfUpdated is true when the server already replaced its binary in
+	// place; a restart is needed to run the new version.
+	SelfUpdated bool `json:"self_updated"`
 }
 
 // CurrentSession is the request body for the per-client

@@ -660,6 +660,10 @@ func (c *Config) setDefaults(workingDir, dataDir string) {
 		c.Options.DisableProviderAutoUpdate, _ = strconv.ParseBool(str)
 	}
 
+	if str, ok := os.LookupEnv("CRUSH_DISABLE_AUTO_UPDATE"); ok {
+		c.Options.DisableAutoUpdate, _ = strconv.ParseBool(str)
+	}
+
 	if str, ok := os.LookupEnv("CRUSH_DISABLE_DEFAULT_PROVIDERS"); ok {
 		c.Options.DisableDefaultProviders, _ = strconv.ParseBool(str)
 	}

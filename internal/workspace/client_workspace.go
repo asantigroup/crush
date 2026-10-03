@@ -1257,6 +1257,7 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 			CurrentVersion: e.Payload.CurrentVersion,
 			LatestVersion:  e.Payload.LatestVersion,
 			IsDevelopment:  e.Payload.IsDevelopment,
+			SelfUpdated:    e.Payload.SelfUpdated,
 		}
 	default:
 		slog.Warn("Unknown event type in translateEvent", "type", fmt.Sprintf("%T", ev))

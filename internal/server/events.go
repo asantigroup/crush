@@ -156,6 +156,7 @@ func wrapEvent(ev any) *pubsub.Payload {
 				CurrentVersion: e.CurrentVersion,
 				LatestVersion:  e.LatestVersion,
 				IsDevelopment:  e.IsDevelopment,
+				SelfUpdated:    e.SelfUpdated,
 			},
 		})
 	case pubsub.Event[skills.Event]:

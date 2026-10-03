@@ -203,6 +203,7 @@ var optionSpecs = map[string]optionSpec{
 	"metrics":              {jsonKey: "disable_metrics", kind: optBool, inverted: true},
 	"auto-summarize":       {jsonKey: "disable_auto_summarize", kind: optBool, inverted: true},
 	"provider-auto-update": {jsonKey: "disable_provider_auto_update", kind: optBool, inverted: true},
+	"auto-update":          {jsonKey: "disable_auto_update", kind: optBool, inverted: true},
 	"default-providers":    {jsonKey: "disable_default_providers", kind: optBool, inverted: true},
 
 	// String fields.

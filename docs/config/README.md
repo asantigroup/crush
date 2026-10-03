@@ -476,6 +476,7 @@ Boolean Keys:
   metrics                        send anonymous usage metrics
   auto-summarize                 automatically summarize long conversations
   provider-auto-update           update the provider catalog automatically
+  auto-update                    upgrade the crush binary automatically (Linux)
   default-providers              include built-in providers
   attribution-generated-with     add the Generated with Crush line
 
