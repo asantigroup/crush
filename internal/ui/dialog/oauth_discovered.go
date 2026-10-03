@@ -95,6 +95,17 @@ func (m *OAuthDiscovered) startPolling(_ string, _ int) tea.Cmd {
 	return nil
 }
 
+// submitCode is unreachable for providers without code entry; the whole
+// discovered flow runs to completion inside initiateAuth.
+func (m *OAuthDiscovered) submitCode(string) tea.Cmd {
+	return nil
+}
+
+// supportsCodeEntry is false: the discovered flow has no device-code entry.
+func (m *OAuthDiscovered) supportsCodeEntry() bool {
+	return false
+}
+
 func (m *OAuthDiscovered) stopPolling() tea.Msg {
 	if m.cancelFunc != nil {
 		m.cancelFunc()
