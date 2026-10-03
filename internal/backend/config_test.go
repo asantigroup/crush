@@ -2,16 +2,33 @@ package backend
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+// catalogProvider returns a provider ID present in the embedded catalog.
+// The trimmed fork catalog may not ship openai, so fall back to any known
+// provider.
+func catalogProvider(t *testing.T) string {
+	t.Helper()
+	known := catwalk.KnownProviders()
+	require.NotEmpty(t, known, "catalog must ship at least one provider")
+	for _, id := range []string{"openai", "umans", "synthetic", "zai"} {
+		if slices.Contains(known, catwalk.InferenceProvider(id)) {
+			return id
+		}
+	}
+	return string(known[0])
+}
 
 // awaitConfigChanged drains events until a ConfigChanged is received
 // for the given workspace ID, or fails the test on timeout. Other
@@ -108,7 +125,7 @@ func TestSetCompactMode_PublishesConfigChanged(t *testing.T) {
 func TestSetProviderAPIKey_PublishesConfigChanged(t *testing.T) {
 	b, ws, evc := newPublishingWorkspace(t)
 
-	require.NoError(t, b.SetProviderAPIKey(ws.ID, config.ScopeGlobal, "openai", "test-key"))
+	require.NoError(t, b.SetProviderAPIKey(ws.ID, config.ScopeGlobal, catalogProvider(t), "test-key"))
 	awaitConfigChanged(t, evc, ws.ID)
 }
 
