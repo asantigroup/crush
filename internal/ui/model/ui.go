@@ -1550,7 +1550,9 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.status.Show(msg))
 	case app.UpdateAvailableMsg:
 		text := fmt.Sprintf("Crush update available: v%s → v%s.", msg.CurrentVersion, msg.LatestVersion)
-		if msg.IsDevelopment {
+		if msg.SelfUpdated {
+			text = fmt.Sprintf("Crush upgraded to v%s in the background. Restart to apply.", msg.LatestVersion)
+		} else if msg.IsDevelopment {
 			text = fmt.Sprintf("This is a development version of Crush. The latest version is v%s.", msg.LatestVersion)
 		}
 		cmds = append(cmds, m.status.Show(util.InfoMsg{

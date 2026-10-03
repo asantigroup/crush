@@ -1301,6 +1301,7 @@ func (w *ClientWorkspace) translateEvent(ev any) tea.Msg {
 			CurrentVersion: e.Payload.CurrentVersion,
 			LatestVersion:  e.Payload.LatestVersion,
 			IsDevelopment:  e.Payload.IsDevelopment,
+			SelfUpdated:    e.Payload.SelfUpdated,
 		}
 	case pubsub.Event[proto.HostThemeState]:
 		theme := e.Payload.Theme
