@@ -188,7 +188,13 @@ func fetchChecksum(ctx context.Context, client Client, checksums Asset, name str
 	}
 	for line := range strings.SplitSeq(string(bts), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == name {
+		if len(fields) != 2 {
+			continue
+		}
+		// Tolerate the "./" prefix `sha256sum ./*` emits and the "*"
+		// binary-mode marker.
+		file := strings.TrimPrefix(strings.TrimPrefix(fields[1], "*"), "./")
+		if file == name {
 			return strings.ToLower(fields[0]), nil
 		}
 	}

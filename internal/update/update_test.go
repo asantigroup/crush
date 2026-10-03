@@ -58,6 +58,35 @@ func TestArchiveAssetName(t *testing.T) {
 	require.Equal(t, "crush_0.9.1_Linux_i386.tar.gz", archiveAssetName("0.9.1", "linux", "386"))
 }
 
+func TestFetchChecksum(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(
+			"aaa111  crush_1.0.0_Linux_x86_64.tar.gz\n" +
+				"bbb222  ./crush_1.0.0_Linux_arm64.tar.gz\n" +
+				"ccc333 *crush_1.0.0_Linux_armv7.tar.gz\n",
+		))
+	}))
+	t.Cleanup(srv.Close)
+
+	asset := Asset{Name: "checksums.txt", DownloadURL: srv.URL}
+	client := testClient{}
+
+	for name, expected := range map[string]string{
+		"crush_1.0.0_Linux_x86_64.tar.gz": "aaa111",
+		"crush_1.0.0_Linux_arm64.tar.gz":  "bbb222",
+		"crush_1.0.0_Linux_armv7.tar.gz":  "ccc333",
+	} {
+		got, err := fetchChecksum(t.Context(), client, asset, name)
+		require.NoError(t, err)
+		require.Equal(t, expected, got)
+	}
+
+	_, err := fetchChecksum(t.Context(), client, asset, "missing.tar.gz")
+	require.ErrorContains(t, err, "no checksum found")
+}
+
 func TestInstallTo_Noop(t *testing.T) {
 	t.Parallel()
 
