@@ -205,4 +205,4 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 )
 
-replace charm.land/catwalk => github.com/asantigroup/catwalk v0.0.0-20260708090622-07272a77f794
+replace charm.land/catwalk => github.com/asantigroup/catwalk v0.52.62
