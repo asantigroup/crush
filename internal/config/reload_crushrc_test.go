@@ -2,11 +2,14 @@ package config_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
+	"charm.land/catwalk/pkg/catwalk"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/stretchr/testify/require"
 )
@@ -118,9 +121,25 @@ func TestLoad_TracksNotYetCreatedGlobalCrushrc(t *testing.T) {
 
 	// A provider must be configured so Load runs past its early
 	// "not configured" return and reaches the staleness snapshot capture.
+	// The trimmed fork catalog may not ship openai, so fall back to a
+	// known provider with a static model list.
+	providerID := ""
+	for _, id := range append([]string{"openai", "umans", "synthetic", "zai"}, func() []string {
+		ids := make([]string, len(catwalk.KnownProviders()))
+		for i, p := range catwalk.KnownProviders() {
+			ids[i] = string(p)
+		}
+		return ids
+	}()...) {
+		if slices.Contains(catwalk.KnownProviders(), catwalk.InferenceProvider(id)) {
+			providerID = id
+			break
+		}
+	}
+	require.NotEmpty(t, providerID, "catalog must ship at least one provider")
 	require.NoError(t, os.WriteFile(
 		filepath.Join(workDir, "crushrc"),
-		[]byte("provider add openai --api-key k\n"), 0o644,
+		[]byte(fmt.Sprintf("provider add %s --api-key k\n", providerID)), 0o644,
 	))
 
 	// Load with no global crushrc present.
