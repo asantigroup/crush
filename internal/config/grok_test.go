@@ -21,6 +21,7 @@ import (
 // previous Grok login so its refreshes cannot shadow the key.
 func TestSetProviderAPIKeyXAIIsEitherOr(t *testing.T) {
 	// Not parallel: t.Setenv below.
+	requireKnownProvider(t, "xai")
 
 	// Point config discovery at the test sandbox: the write below
 	// triggers an auto-reload, which must not pick up the developer's
@@ -263,6 +264,7 @@ func TestLoadRefreshesGrokModelsWhenCatwalkUpdates(t *testing.T) {
 // only follows actual Catwalk updates: a 304 Not Modified leaves the
 // persisted catalog alone.
 func TestLoadKeepsGrokModelsWhenCatwalkNotModified(t *testing.T) {
+	requireKnownProvider(t, "xai")
 	// Not parallel: swaps package-level provider state and the fetch
 	// stub, and sets environment variables.
 	workDir, dataDir := isolateLoadEnv(t)

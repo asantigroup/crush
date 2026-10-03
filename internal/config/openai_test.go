@@ -118,6 +118,7 @@ func TestHasAPIKey(t *testing.T) {
 // Copilot keeps mirroring the access token into api_key as before.
 func TestSetProviderAPIKeyOpenAIIsEitherOr(t *testing.T) {
 	// Not parallel: t.Setenv below.
+	requireKnownProvider(t, "openai")
 
 	// Point config discovery at the test sandbox: the write below
 	// triggers an auto-reload, which must not pick up the developer's
@@ -418,6 +419,7 @@ func TestLoadRefreshesChatGPTModelsWhenCatwalkUpdates(t *testing.T) {
 func TestLoadKeepsChatGPTModelsWhenCatwalkNotModified(t *testing.T) {
 	// Not parallel: swaps package-level provider state and the fetch
 	// stub, and sets environment variables.
+	requireKnownProvider(t, "openai")
 	workDir, dataDir := isolateLoadEnv(t)
 	newCatwalkStub(t, http.StatusNotModified, nil)
 	resetProviderState()
