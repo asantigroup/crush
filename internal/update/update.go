@@ -11,10 +11,10 @@ import (
 	"time"
 )
 
-const (
-	githubApiUrl = "https://api.github.com/repos/asantigroup/crush/releases/latest"
-	userAgent    = "crush/1.0"
-)
+// githubApiUrl is a variable so tests can point the client at a fake API.
+var githubApiUrl = "https://api.github.com/repos/asantigroup/crush/releases/latest"
+
+const userAgent = "crush/1.0"
 
 // Default is the default [Client].
 var Default Client = &github{}
@@ -112,6 +112,11 @@ func (c *github) do(ctx context.Context, url string) (*http.Response, error) {
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	// Authenticate when a token is available to avoid the unauthenticated
+	// per-IP rate limit; without one the request proceeds anonymously.
+	if token := githubToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

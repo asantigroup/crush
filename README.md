@@ -988,6 +988,12 @@ export CRUSH_DISABLE_AUTO_UPDATE=1
 
 You can also upgrade manually at any time with `crush upgrade`.
 
+Update checks hit the GitHub API, which allows only 60 unauthenticated
+requests per hour per IP. When a token is available, Crush sends it
+instead to avoid that limit. Tokens are read from `CRUSH_GITHUB_TOKEN`,
+`GH_TOKEN`, or `GITHUB_TOKEN`, or picked up from an existing `gh` CLI
+login.
+
 ### Manually updating providers
 
 Manually updating providers is possible with the `crush update-providers`
