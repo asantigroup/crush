@@ -174,18 +174,25 @@ func DiscoverModels(ctx context.Context, cfg Config, resolver Resolver) ([]catwa
 		} else if e.MaxOutputTokens != nil && *e.MaxOutputTokens > 0 {
 			m.DefaultMaxTokens = *e.MaxOutputTokens
 		}
-		if e.CanReason != nil {
-			m.CanReason = *e.CanReason
+		if e.CanReason != nil && *e.CanReason {
+			m.Reasoning.Thinking = catwalk.ThinkingAlways
 		}
 		if len(e.ReasoningLevels) > 0 {
-			m.ReasoningLevels = e.ReasoningLevels
+			m.Reasoning.Thinking = catwalk.ThinkingToggleable
+			m.Reasoning.EffortLevels = make([]catwalk.EffortLevel, 0, len(e.ReasoningLevels))
+			for _, level := range e.ReasoningLevels {
+				m.Reasoning.EffortLevels = append(m.Reasoning.EffortLevels, catwalk.EffortLevel{
+					Value:   level,
+					Display: strings.ToUpper(level[:1]) + level[1:],
+				})
+			}
 		}
 		if e.Pricing != nil {
 			if e.Pricing.Input != nil {
-				m.CostPer1MIn = *e.Pricing.Input
+				m.Pricing.Input = *e.Pricing.Input
 			}
 			if e.Pricing.Output != nil {
-				m.CostPer1MOut = *e.Pricing.Output
+				m.Pricing.Output = *e.Pricing.Output
 			}
 		}
 		result = append(result, m)

@@ -4,7 +4,7 @@ import (
 	"slices"
 	"testing"
 
-	"charm.land/catwalk/pkg/catwalk"
+	"charm.land/catwalk/v3/pkg/catwalk"
 )
 
 // requireKnownProvider skips the test when the embedded provider catalog

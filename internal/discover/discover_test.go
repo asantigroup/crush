@@ -81,17 +81,17 @@ func TestDiscoverModels_ParsesModelMetadata(t *testing.T) {
 	require.Equal(t, "Reasoning Model", models[0].Name)
 	require.Equal(t, int64(1048576), models[0].ContextWindow)
 	require.Equal(t, int64(32768), models[0].DefaultMaxTokens)
-	require.True(t, models[0].CanReason)
-	require.Equal(t, []string{"low", "medium", "high"}, models[0].ReasoningLevels)
-	require.Equal(t, 1.4, models[0].CostPer1MIn)
-	require.Equal(t, 4.4, models[0].CostPer1MOut)
+	require.True(t, models[0].CanReason())
+	require.Equal(t, []string{"low", "medium", "high"}, models[0].ReasoningEffortLevels())
+	require.Equal(t, 1.4, models[0].Pricing.Input)
+	require.Equal(t, 4.4, models[0].Pricing.Output)
 
 	require.Equal(t, "plain-model", models[1].ID)
 	require.Equal(t, "plain-model", models[1].Name)
 	require.Equal(t, int64(262144), models[1].ContextWindow)
 	require.Equal(t, int64(8192), models[1].DefaultMaxTokens)
-	require.False(t, models[1].CanReason)
-	require.Empty(t, models[1].ReasoningLevels)
+	require.False(t, models[1].CanReason())
+	require.Empty(t, models[1].ReasoningEffortLevels())
 }
 
 func TestDiscoverModels_ExistingModelsWin(t *testing.T) {

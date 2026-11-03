@@ -393,7 +393,6 @@ func NewBashTool(permissions permission.Service, workingDir, spillDir string, at
 
 			// Start with detached context so it can survive if moved to background
 			bgManager := shell.GetBackgroundShellManager()
-			bgManager.Cleanup()
 			bgShell, err := bgManager.Start(context.Background(), execWorkingDir, blockFuncs(allowedBashCommands), params.Command, params.Description, maxBackgroundJobs)
 			if err != nil {
 				return fantasy.NewTextErrorResponse("Failed to start shell: " + err.Error()), nil
