@@ -197,6 +197,11 @@ func NewHandler(
 				ClientName:   "Crush",
 				RedirectURIs: []string{redirectURL},
 				GrantTypes:   []string{"authorization_code", "refresh_token"},
+				// A native CLI cannot keep a client secret, and the flow
+				// already uses PKCE. Sending the public-client method
+				// explicitly also satisfies servers that reject metadata
+				// omitting it (IBKR answers 400 without a value).
+				TokenEndpointAuthMethod: "none",
 			},
 		},
 	}

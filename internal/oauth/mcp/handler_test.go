@@ -32,6 +32,9 @@ type fakeASOpts struct {
 	refreshToken   string // refresh_token returned by /token
 	tokenExpiresIn int    // expires_in returned by /token (0 => 3600)
 	failRegister   bool   // make /register return 500 (server has no DCR)
+	// requireAuthMethod rejects registrations that omit
+	// token_endpoint_auth_method, as IBKR does.
+	requireAuthMethod bool
 	// issSupported advertises RFC 9207: the server promises to name itself
 	// in the authorization response, and the SDK rejects the authorization
 	// if no issuer comes back.
@@ -80,6 +83,17 @@ func newFakeAS(t *testing.T, opts fakeASOpts) (base, mcpURL string) {
 		if opts.failRegister {
 			http.Error(w, "registration not supported", http.StatusInternalServerError)
 			return
+		}
+		if opts.requireAuthMethod {
+			var meta map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&meta); err != nil {
+				http.Error(w, "invalid registration metadata", http.StatusBadRequest)
+				return
+			}
+			if meta["token_endpoint_auth_method"] == nil {
+				http.Error(w, "token_endpoint_auth_method is required", http.StatusBadRequest)
+				return
+			}
 		}
 		writeJSON(w, map[string]any{
 			"client_id":                  opts.clientID,
@@ -206,6 +220,24 @@ func TestHandler_FreshAuthorize(t *testing.T) {
 	require.NotNil(t, saved.Client)
 	require.Equal(t, "fresh-client", saved.Client.ClientID)
 	require.Equal(t, base+"/token", saved.Client.TokenURL)
+}
+
+// TestHandler_DynamicRegistrationSendsAuthMethod proves the registration
+// request names token_endpoint_auth_method. Servers such as IBKR reject
+// DCR when the field is missing, even though RFC 7591 makes it optional.
+func TestHandler_DynamicRegistrationSendsAuthMethod(t *testing.T) {
+	base, mcpURL := newFakeAS(t, fakeASOpts{
+		clientID:          "method-client",
+		accessToken:       "method-access",
+		requireAuthMethod: true,
+	})
+
+	h, err := NewHandler("test", mcpURL, nil, nil, func(*oauth.Token) {}, true, 0)
+	require.NoError(t, err)
+	t.Cleanup(h.Close)
+	h.openURL = browserRedirect("method-code")
+
+	require.NoError(t, authorizeWith401(t, h, base, mcpURL))
 }
 
 // TestHandler_PreregisteredClientSkipsDCR proves that a configured client is
