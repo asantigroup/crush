@@ -206,4 +206,4 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 )
 
-replace charm.land/catwalk/v3 => github.com/asantigroup/catwalk/v3 v3.0.1
+replace charm.land/catwalk/v3 => github.com/asantigroup/catwalk/v3 v3.4.0
