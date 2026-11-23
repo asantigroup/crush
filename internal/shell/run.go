@@ -1,18 +1,21 @@
 package shell
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"strings"
 
+	"github.com/charmbracelet/crush/internal/sshaskpass"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/charmbracelet/crush/internal/pinentry"
 )
 
 // RunOptions configures a single stateless shell execution via [Run].
@@ -46,6 +49,9 @@ type RunOptions struct {
 	// TermWidth is the terminal width in columns for PTY execution.
 	// Zero uses a default of 200.
 	TermWidth int
+	// Exports, if set, is called after a successful run for each variable
+	// the command exported or changed while exported.
+	Exports func(name, value string)
 }
 
 // Run parses and executes a shell command using the same mvdan.cc/sh
@@ -69,6 +75,10 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		return fmt.Errorf("shell.Run: Cwd is required")
 	}
 
+	// Let the pinentry watcher poll at full rate for the lifetime of the
+	// command so a gpg-agent passphrase prompt gets the terminal quickly.
+	defer pinentry.TrackCommand()()
+
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = io.Discard
@@ -88,7 +98,37 @@ func Run(ctx context.Context, opts RunOptions) (err error) {
 		return fmt.Errorf("could not run command: %w", err)
 	}
 
-	return runner.Run(ctx, line)
+	if opts.Exports == nil {
+		return runner.Run(ctx, line)
+	}
+
+	// Reset seeds interpreter defaults (IFS, OPTIND, ...) so they land in
+	// the snapshot and are not mistaken for the script's own exports.
+	runner.Reset()
+	before := maps.Collect(runner.Env.Each)
+	maps.Copy(before, runner.Vars)
+
+	if err := runner.Run(ctx, line); err != nil {
+		return err
+	}
+	reportExports(before, runner.Vars, opts.Exports)
+	return nil
+}
+
+// reportExports calls report for each exported string variable in after
+// that is new or changed relative to before. PWD and OLDPWD are skipped
+// because cd changes them as a side effect, not as an export.
+func reportExports(before, after map[string]expand.Variable, report func(name, value string)) {
+	for _, name := range slices.Sorted(maps.Keys(after)) {
+		v := after[name]
+		if name == "PWD" || name == "OLDPWD" || !v.Exported || !v.IsSet() || v.Kind != expand.String {
+			continue
+		}
+		if prev, ok := before[name]; ok && prev.Exported && prev.Str == v.Str {
+			continue
+		}
+		report(name, v.Str)
+	}
 }
 
 // CaptureResult holds the combined output and exit code from a
@@ -128,9 +168,9 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 		opts.Env = os.Environ()
 	}
 
-	var stdout, stderr bytes.Buffer
-	opts.Stdout = &stdout
-	opts.Stderr = &stderr
+	stdout, stderr := newCappedBuffer(maxKeptOutput), newCappedBuffer(maxKeptOutput)
+	opts.Stdout = stdout
+	opts.Stderr = stderr
 
 	runErr := Run(ctx, opts)
 
@@ -140,11 +180,11 @@ func RunAndCapture(ctx context.Context, opts RunOptions) (CaptureResult, error) 
 	}
 
 	output := stdout.String()
-	if stderr.Len() > 0 {
+	if errOutput := stderr.String(); errOutput != "" {
 		if output != "" {
 			output += "\n"
 		}
-		output += stderr.String()
+		output += errOutput
 	}
 
 	return CaptureResult{
@@ -231,19 +271,31 @@ var nonInteractiveEnvVars = []string{
 }
 
 // withNonInteractiveEnv returns env with nonInteractiveEnvVars forced in,
-// replacing any existing values for those keys. The returned slice is a
-// new allocation safe to use concurrently with the input.
+// replacing any existing values for those keys. The integrated pinentry
+// and ssh askpass vars are also replaced so stale values from a parent
+// process never leak through. The returned slice is a new allocation
+// safe to use concurrently with the input.
 func withNonInteractiveEnv(env []string) []string {
 	// Build a set of override keys for fast lookup.
-	overrideKeys := make(map[string]bool, len(nonInteractiveEnvVars))
+	overrideKeys := make(map[string]bool, len(nonInteractiveEnvVars)+4)
 	for _, kv := range nonInteractiveEnvVars {
+		if key, _, ok := strings.Cut(kv, "="); ok {
+			overrideKeys[key] = true
+		}
+	}
+	for _, kv := range pinentry.GitWrapperEnv() {
+		if key, _, ok := strings.Cut(kv, "="); ok {
+			overrideKeys[key] = true
+		}
+	}
+	for _, kv := range sshaskpass.AskpassEnv() {
 		if key, _, ok := strings.Cut(kv, "="); ok {
 			overrideKeys[key] = true
 		}
 	}
 
 	// Copy env, filtering out any keys we will override.
-	result := make([]string, 0, len(env)+len(nonInteractiveEnvVars))
+	result := make([]string, 0, len(env)+len(nonInteractiveEnvVars)+4)
 	for _, e := range env {
 		if key, _, ok := strings.Cut(e, "="); ok && overrideKeys[key] {
 			continue
@@ -251,7 +303,10 @@ func withNonInteractiveEnv(env []string) []string {
 		result = append(result, e)
 	}
 
-	return append(result, nonInteractiveEnvVars...)
+	result = append(result, nonInteractiveEnvVars...)
+	result = append(result, pinentry.GitWrapperEnv()...)
+	result = append(result, sshaskpass.AskpassEnv()...)
+	return result
 }
 
 // herdrEnvVars are the environment variables herdr injects into panes
@@ -291,18 +346,33 @@ type execMiddleware = func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc
 
 // standardHandlers returns the exec-handler middleware chain used by both
 // [Run] and [Shell]. Order matters:
-//  1. builtins first (so Crush's in-process jq wins over any PATH binary);
-//  2. script dispatch (shebang / binary / shell-source for path-prefixed
-//     argv[0], no-op for bare commands) — runs before the block list so
-//     that deny rules see the already-resolved argv of anything the
-//     script exec's rather than the outer path-prefixed wrapper;
-//  3. block list;
-//  4. optional Go coreutils (only when useGoCoreUtils is on).
+//  1. block list first, so nothing downstream can route around it. A
+//     builtin, a shebang script, and a binary are all subject to the same
+//     rules, and a script named after a denied command is caught by the
+//     name it was invoked under;
+//  2. builtins (so Crush's in-process jq wins over any PATH binary);
+//  3. script dispatch (shebang / binary / shell-source for path-prefixed
+//     argv[0], no-op for bare commands). The shell-source branch builds a
+//     nested runner carrying the same block list, so deny rules keep
+//     applying to commands an in-process script invokes;
+//  4. the integrated pinentry, which drives credential-relevant gpg
+//     invocations through loopback pinentry (the TUI prompts for the
+//     passphrase/PIN) instead of an external terminal pinentry. It runs
+//     after the block list so deny rules still apply to gpg;
+//  5. optional Go coreutils (only when useGoCoreUtils is on).
+//
+// What this chain can and cannot see is worth stating plainly, because it
+// is easy to assume more: it observes commands this interpreter dispatches
+// itself. A command that runs inside a *child process* — a shebang script's
+// interpreter, `sh -c`, make, a language runtime — is invisible to it. The
+// block list is a guardrail against invoking something dangerous by
+// accident, not a sandbox.
 func standardHandlers(blockFuncs []BlockFunc) []execMiddleware {
 	handlers := []execMiddleware{
+		blockHandler(blockFuncs),
 		builtinHandler(),
 		scriptDispatchHandler(blockFuncs),
-		blockHandler(blockFuncs),
+		gpgHandler(),
 	}
 	if useGoCoreUtils && coreUtilsExecHandler != nil {
 		handlers = append(handlers, coreUtilsExecHandler)
@@ -340,7 +410,10 @@ func blockHandler(blockFuncs []BlockFunc) execMiddleware {
 			}
 			for _, blockFunc := range blockFuncs {
 				if blockFunc(args) {
-					return fmt.Errorf("command is not allowed for security reasons: %q", args[0])
+					// Name the command that was recognised, not the wrapper
+					// in front of it, so this agrees with the warning the
+					// static check would have shown for the same command.
+					return fmt.Errorf("blocked: %s is a dangerous command", normalizeCommand(ResolveArgv(args)[0]))
 				}
 			}
 			return next(ctx, args)

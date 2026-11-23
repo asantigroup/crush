@@ -171,6 +171,12 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				if !sendEvent(ctx, events, e) {
 					return
 				}
+			case pubsub.PayloadTypeToolProgress:
+				var e pubsub.Event[proto.ToolProgress]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
 			case pubsub.PayloadTypeMCPEvent:
 				var e pubsub.Event[proto.MCPEvent]
 				_ = json.Unmarshal(p.Payload, &e)
@@ -197,6 +203,30 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				}
 			case pubsub.PayloadTypeQuestionNotification:
 				var e pubsub.Event[proto.QuestionNotification]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypePinentryPromptRequest:
+				var e pubsub.Event[proto.PinentryPromptRequest]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypePinentryNotification:
+				var e pubsub.Event[proto.PinentryNotification]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeSSHPromptRequest:
+				var e pubsub.Event[proto.SSHPromptRequest]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypeSSHNotification:
+				var e pubsub.Event[proto.SSHNotification]
 				_ = json.Unmarshal(p.Payload, &e)
 				if !sendEvent(ctx, events, e) {
 					return
@@ -257,6 +287,12 @@ func (c *Client) SubscribeEvents(ctx context.Context, id string) (<-chan any, er
 				}
 			case pubsub.PayloadTypeClientSession:
 				var e pubsub.Event[proto.ClientSession]
+				_ = json.Unmarshal(p.Payload, &e)
+				if !sendEvent(ctx, events, e) {
+					return
+				}
+			case pubsub.PayloadTypePermissionModeChanged:
+				var e pubsub.Event[proto.PermissionModeEvent]
 				_ = json.Unmarshal(p.Payload, &e)
 				if !sendEvent(ctx, events, e) {
 					return
@@ -510,12 +546,15 @@ func (c *Client) SetMainAgent(ctx context.Context, id, agentID string) error {
 // for completion detection. Pass "" when the caller does not need
 // to distinguish its own turn's terminal event from any concurrent
 // turn on the same session (e.g. interactive TUI usage).
-func (c *Client) SendMessage(ctx context.Context, id string, sessionID, runID, channel, prompt string, attachments ...message.Attachment) error {
+//
+// There is no channel parameter on purpose: the channel binding of a
+// run is set server-side by the channel injection path, never sent
+// from a client.
+func (c *Client) SendMessage(ctx context.Context, id string, sessionID, runID, prompt string, attachments ...message.Attachment) error {
 	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/agent", id), nil, jsonBody(proto.AgentMessage{
 		HiddenUserMessage: message.HiddenUserMessage(ctx),
 		SessionID:         sessionID,
 		RunID:             runID,
-		Channel:           channel,
 		Prompt:            prompt,
 		Attachments:       proto.AttachmentsFromMessage(attachments),
 	}), http.Header{"Content-Type": []string{"application/json"}})
@@ -715,6 +754,21 @@ func (c *Client) GrantPermission(ctx context.Context, id string, req proto.Permi
 	return resp.Resolved, nil
 }
 
+// AutoApproveSession asks the server to grant every permission request
+// the session raises without prompting. An error matching [ErrNotFound]
+// means the server does not know the workspace or predates the endpoint.
+func (c *Client) AutoApproveSession(ctx context.Context, id string, sessionID string) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/sessions/%s/auto-approve", id, sessionID), nil, nil, nil)
+	if err != nil {
+		return fmt.Errorf("failed to auto-approve session: %w", err)
+	}
+	defer rsp.Body.Close()
+	if err := checkStatus(rsp); err != nil {
+		return fmt.Errorf("failed to auto-approve session: %w", err)
+	}
+	return nil
+}
+
 // AnswerQuestionBatch submits answers for a batch question on a
 // workspace. Returns true if this call resolved the pending
 // request, false if already resolved by another caller.
@@ -734,11 +788,11 @@ func (c *Client) AnswerQuestionBatch(ctx context.Context, id string, req proto.Q
 	return resp.Resolved, nil
 }
 
-// CancelQuestionBatch cancels the pending question batch on a
-// workspace. Returns true if a question was cancelled, false if
-// none was pending.
-func (c *Client) CancelQuestionBatch(ctx context.Context, id string) (bool, error) {
-	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/questions/cancel", id), nil, nil, http.Header{})
+// CancelQuestionBatch cancels the pending question batch with the
+// given ID on a workspace. Returns true if a question was cancelled,
+// false if none was pending.
+func (c *Client) CancelQuestionBatch(ctx context.Context, id, batchID string) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/questions/cancel", id), nil, jsonBody(proto.QuestionCancel{BatchRequestID: batchID}), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
 		return false, fmt.Errorf("failed to cancel question batch: %w", err)
 	}
@@ -753,34 +807,92 @@ func (c *Client) CancelQuestionBatch(ctx context.Context, id string) (bool, erro
 	return resp.Resolved, nil
 }
 
-// SetPermissionsSkipRequests sets the skip-requests flag for a workspace.
-func (c *Client) SetPermissionsSkipRequests(ctx context.Context, id string, skip bool) error {
-	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/permissions/skip", id), nil, jsonBody(proto.PermissionSkipRequest{Skip: skip}), http.Header{"Content-Type": []string{"application/json"}})
+// AnswerPinentry submits a secret for the pending integrated pinentry
+// prompt on a workspace. Returns true if this call resolved the
+// pending prompt, false if already resolved by another caller.
+func (c *Client) AnswerPinentry(ctx context.Context, id string, req proto.PinentryAnswer) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/pinentry/answer", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
-		return fmt.Errorf("failed to set permissions skip requests: %w", err)
+		return false, fmt.Errorf("failed to answer pinentry prompt: %w", err)
 	}
 	defer rsp.Body.Close()
 	if rsp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to set permissions skip requests: status code %d", rsp.StatusCode)
+		return false, fmt.Errorf("failed to answer pinentry prompt: status code %d", rsp.StatusCode)
 	}
-	return nil
+	var resp proto.PinentryResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode answer pinentry prompt response: %w", err)
+	}
+	return resp.Resolved, nil
 }
 
-// GetPermissionsSkipRequests retrieves the skip-requests flag for a workspace.
-func (c *Client) GetPermissionsSkipRequests(ctx context.Context, id string) (bool, error) {
-	rsp, err := c.get(ctx, fmt.Sprintf("/workspaces/%s/permissions/skip", id), nil, nil)
+// CancelPinentry dismisses the pending integrated pinentry prompt on
+// a workspace. Returns true if a prompt was cancelled, false if none
+// was pending.
+func (c *Client) CancelPinentry(ctx context.Context, id string, req proto.PinentryCancel) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/pinentry/cancel", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
 	if err != nil {
-		return false, fmt.Errorf("failed to get permissions skip requests: %w", err)
+		return false, fmt.Errorf("failed to cancel pinentry prompt: %w", err)
 	}
 	defer rsp.Body.Close()
 	if rsp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("failed to get permissions skip requests: status code %d", rsp.StatusCode)
+		return false, fmt.Errorf("failed to cancel pinentry prompt: status code %d", rsp.StatusCode)
 	}
-	var skip proto.PermissionSkipRequest
-	if err := json.NewDecoder(rsp.Body).Decode(&skip); err != nil {
-		return false, fmt.Errorf("failed to decode permissions skip requests: %w", err)
+	var resp proto.PinentryResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode cancel pinentry prompt response: %w", err)
 	}
-	return skip.Skip, nil
+	return resp.Resolved, nil
+}
+
+// AnswerSSH submits a secret for the pending integrated SSH prompt on a
+// workspace. Returns true if this call resolved the pending prompt,
+// false if already resolved by another caller.
+func (c *Client) AnswerSSH(ctx context.Context, id string, req proto.SSHAnswer) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/ssh/answer", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return false, fmt.Errorf("failed to answer ssh prompt: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to answer ssh prompt: status code %d", rsp.StatusCode)
+	}
+	var resp proto.SSHResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode answer ssh prompt response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
+// CancelSSH dismisses the pending integrated SSH prompt on a workspace.
+// Returns true if a prompt was cancelled, false if none was pending.
+func (c *Client) CancelSSH(ctx context.Context, id string, req proto.SSHCancel) (bool, error) {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/ssh/cancel", id), nil, jsonBody(req), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return false, fmt.Errorf("failed to cancel ssh prompt: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("failed to cancel ssh prompt: status code %d", rsp.StatusCode)
+	}
+	var resp proto.SSHResponse
+	if err := json.NewDecoder(rsp.Body).Decode(&resp); err != nil {
+		return false, fmt.Errorf("failed to decode cancel ssh prompt response: %w", err)
+	}
+	return resp.Resolved, nil
+}
+
+// SetPermissionMode sets the permission mode for a workspace.
+func (c *Client) SetPermissionMode(ctx context.Context, id string, mode proto.WorkspacePermissionMode) error {
+	rsp, err := c.post(ctx, fmt.Sprintf("/workspaces/%s/permissions/mode", id), nil, jsonBody(proto.PermissionSetModeRequest{Mode: mode}), http.Header{"Content-Type": []string{"application/json"}})
+	if err != nil {
+		return fmt.Errorf("failed to set permission mode: %w", err)
+	}
+	defer rsp.Body.Close()
+	if rsp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to set permission mode: status code %d", rsp.StatusCode)
+	}
+	return nil
 }
 
 // SetHostTheme sets the theme a host application supplies for every

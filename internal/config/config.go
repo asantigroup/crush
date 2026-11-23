@@ -322,11 +322,12 @@ type LSPConfig struct {
 type TUIOptions struct {
 	CompactMode bool        `json:"compact_mode,omitempty" jsonschema:"description=Enable compact mode for the TUI interface,default=false"`
 	DiffMode    string      `json:"diff_mode,omitempty" jsonschema:"description=Diff mode for the TUI interface,enum=unified,enum=split"`
-	ActiveTheme string      `json:"active_theme,omitempty" jsonschema:"description=Name of the currently active theme,default=charmtone-panther,example=charmtone-panther,example=gruvbox-dark,example=keanu"`
+	ActiveTheme string      `json:"active_theme,omitempty" jsonschema:"description=Name of the currently active theme,default=charmtone-panther,example=charmtone-panther,example=gruvbox-dark,example=rose-pine,example=keanu,example=kitt"`
 	Completions Completions `json:"completions,omitzero" jsonschema:"description=Completions UI options"`
 	Transparent *bool       `json:"transparent,omitempty" jsonschema:"description=Enable transparent background for the TUI interface,default=false"`
 	Scrollbar   string      `json:"scrollbar,omitempty" jsonschema:"description=Chat scrollbar visibility,enum=default,enum=always,enum=never,default=default"`
 	Mouse       *bool       `json:"mouse,omitempty" jsonschema:"description=Enable terminal mouse capture for selection\\, clicks\\, and scrolling in the TUI. Disable to let the terminal emulator or tmux handle text selection and copy/paste,default=true"`
+	NerdFonts   *bool       `json:"nerd_fonts,omitempty" jsonschema:"description=Override Nerd Font glyph detection for the TUI: true forces glyphs on\\, false forces them off\\, and unset keeps automatic detection"`
 	ExitBanner  ExitBanner  `json:"exit_banner,omitempty" jsonschema:"description=Exit banner style after quitting Crush,enum=default,enum=compact,enum=none,default=default"`
 }
 
@@ -410,6 +411,24 @@ const (
 
 type Permissions struct {
 	AllowedTools []string `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=view"`
+	// BlockedCommands adds to the built-in list of commands treated as
+	// dangerous. Dangerous commands are prompted for in normal mode, and
+	// blocked at exec time when they turn up indirectly.
+	BlockedCommands []string `json:"blocked_commands,omitempty" jsonschema:"description=Extra shell commands to treat as dangerous (prompted for in normal mode),example=kubectl,example=terraform"`
+	// AllowedCommands removes entries from the effective dangerous list,
+	// including the built-in defaults.
+	AllowedCommands []string `json:"allowed_commands,omitempty" jsonschema:"description=Shell commands to drop from the dangerous list so they stop prompting,example=curl,example=ssh"`
+	// SafeCommands are exact command lines that skip the permission prompt
+	// entirely, e.g. "go build" or "cargo check". An entry matches only when
+	// the command is written exactly as given, with no extra arguments and
+	// no flags, so "go build" never covers "go build -o /usr/local/bin/x".
+	//
+	// This is the narrow form on purpose. The built-in list carries a flag
+	// policy per command, which is what lets `git log` through while holding
+	// back `git push` and `git diff --output=FILE`. Expressing that in
+	// configuration would be a small security language, and the thing people
+	// actually want to say is "the exact command I run fifty times a day".
+	SafeCommands []string `json:"safe_commands,omitempty" jsonschema:"description=Exact command lines that skip the permission prompt. Matched literally with no extra arguments,example=go build,example=cargo check"`
 }
 
 type TrailerStyle string
@@ -462,6 +481,13 @@ type Options struct {
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
 	RequestTimeout            *int         `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity between tokens\\, so slow but active streams are never killed; the wait for the first token gets at least five minutes for prompt prefill. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
 	MaxBackgroundJobs         *int         `json:"max_background_jobs,omitempty" jsonschema:"description=How many background shell jobs may run at once. Jobs that have finished never count against it. 0 or negative restores the default.,default=50,example=10,example=200"`
+	// PinentryIntegrated renders GPG passphrase/PIN prompts as a native
+	// Crush dialog (loopback pinentry) instead of handing the terminal
+	// over to an external pinentry program. No GPG or git configuration
+	// is modified: the redirect only applies to processes Crush spawns.
+	PinentryIntegrated   *bool       `json:"pinentry_integrated,omitempty" jsonschema:"description=Render GPG passphrase prompts as a native Crush dialog instead of an external pinentry program. Works with file-based keys and security keys and never modifies GPG or git configuration.,default=true"`
+	PinentryCacheTimeout *int        `json:"pinentry_cache_timeout,omitempty" jsonschema:"description=Seconds Crush keeps an entered GPG passphrase in memory so repeated signing operations do not re-prompt. 0 (the default) disables it; gpg-agent's own cache applies regardless.,default=0,example=300"`
+	Prompts              PromptPaths `json:"prompts,omitempty" jsonschema:"description=Files that replace Crush's built-in prompts\\, keyed by prompt name. A replacement is used verbatim\\, so anything the built-in template injected (skills\\, context files\\, LSP status) is lost unless the replacement asks for it too."`
 }
 
 // DefaultMaxBackgroundJobs is how many background shell jobs may run at once
@@ -475,6 +501,13 @@ func (o *Options) GetMaxBackgroundJobs() int {
 	}
 	return *o.MaxBackgroundJobs
 }
+
+// PromptPaths maps a built-in prompt name to a file that replaces it.
+type PromptPaths map[string]string
+
+// PromptNames are the built-in prompts that options.prompts can replace. The
+// agent package owns the templates themselves and asserts it covers this list.
+var PromptNames = []string{"coder", "task", "plan", "summary", "title", "initialize"}
 
 // DefaultRequestTimeout bounds each LLM API request when the user has not
 // configured a timeout. Slow or unreachable providers fail after it instead
@@ -496,6 +529,28 @@ func (o *Options) GetRequestTimeout() time.Duration {
 		return 0
 	}
 	return time.Duration(*o.RequestTimeout) * time.Second
+}
+
+// GetPinentryIntegrated reports whether the integrated pinentry is
+// enabled. Enabled by default; callers use it to decide whether to
+// prompt in-app or let the external pinentry handle credentials.
+func (o *Options) GetPinentryIntegrated() bool {
+	if o == nil || o.PinentryIntegrated == nil {
+		return true
+	}
+	return *o.PinentryIntegrated
+}
+
+// GetPinentryCacheTimeout returns how long an entered GPG passphrase may
+// stay in Crush's memory, or 0 when caching is disabled.
+func (o *Options) GetPinentryCacheTimeout() time.Duration {
+	if o == nil || o.PinentryCacheTimeout == nil {
+		return 0
+	}
+	if *o.PinentryCacheTimeout <= 0 {
+		return 0
+	}
+	return time.Duration(*o.PinentryCacheTimeout) * time.Second
 }
 
 type MCPs map[string]MCPConfig
@@ -952,6 +1007,30 @@ func (c *Config) IsModelAvailable(provider, model string) bool {
 	return false
 }
 
+// UsableModels returns the models the current credential can serve: a
+// ChatGPT or Grok login only reaches its subscription's models.
+func (p ProviderConfig) UsableModels() []catwalk.Model {
+	if models, ok := p.SubscriptionModels(); ok {
+		return models
+	}
+	return p.Models
+}
+
+// SubscriptionModels returns the models a ChatGPT or Grok login grants, and
+// whether the provider is signed in with one at all.
+func (p ProviderConfig) SubscriptionModels() ([]catwalk.Model, bool) {
+	if p.OAuthToken == nil {
+		return nil, false
+	}
+	switch catwalk.InferenceProvider(p.ID) {
+	case catwalk.InferenceProviderOpenAI:
+		return p.ChatGPTModels, true
+	case catwalk.InferenceProviderXAI:
+		return p.GrokModels, true
+	}
+	return nil, false
+}
+
 func (c *Config) GetProviderForModel(modelType SelectedModelType) *ProviderConfig {
 	model, ok := c.Models[modelType]
 	if !ok {
@@ -992,6 +1071,10 @@ const maxRecentModelsPerType = 5
 func allToolNames() []string {
 	return []string{
 		"agent",
+		"agent_dispatch",
+		"agent_send",
+		"agent_status",
+		"agent_stop",
 		"bash",
 		"crush_info",
 		"crush_logs",
@@ -1039,9 +1122,15 @@ func resolveReadOnlyTools(tools []string) []string {
 
 func resolvePlanTools(tools []string) []string {
 	// The read-only LSP lookups mirror the task agent's tool set: planning
-	// needs symbol navigation just as much as research does.
+	// needs symbol navigation just as much as research does. Both
+	// delegation styles are listed; the coordinator keeps whichever one
+	// suits the run mode.
 	planTools := []string{
 		"agent",
+		"agent_dispatch",
+		"agent_send",
+		"agent_status",
+		"agent_stop",
 		"glob",
 		"grep",
 		"ls",
@@ -1053,6 +1142,13 @@ func resolvePlanTools(tools []string) []string {
 		"view",
 	}
 	return filterSlice(tools, planTools, true)
+}
+
+// resolveTaskTools returns the tools available to the task subagent: the
+// read-only set plus bash, so it can run git diff, tests, and rg while
+// reviewing. It still cannot edit or write files.
+func resolveTaskTools(tools []string) []string {
+	return filterSlice(tools, append(resolveReadOnlyTools(tools), "bash"), true)
 }
 
 func filterSlice(data []string, mask []string, include bool) []string {
@@ -1086,7 +1182,7 @@ func (c *Config) SetupAgents() {
 			Description:  "An agent that helps with searching for context and finding implementation details.",
 			Model:        SelectedModelTypeLarge,
 			ContextPaths: c.Options.ContextPaths,
-			AllowedTools: resolveReadOnlyTools(allowedTools),
+			AllowedTools: resolveTaskTools(allowedTools),
 			// NO MCPs or LSPs by default
 			AllowedMCP: map[string][]string{},
 		},

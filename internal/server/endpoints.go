@@ -12,7 +12,9 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 	return []apigen.Endpoint{
 		apigen.Get("/v1/health").
 			Summary("Health check").
+			Description("Answers 503 once the server has committed to shutting down.").
 			Tags("system").
+			Fails(503).
 			Handle(c.handleGetHealth),
 
 		apigen.Get("/v1/version").
@@ -159,7 +161,10 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 				"question prompts are scoped to the session the client currently "+
 				"views (see POST current-session): they are only delivered to clients "+
 				"viewing the session that raised them, and clients viewing no session "+
-				"receive none. All other events are workspace-wide.").
+				"receive none. All other events are workspace-wide. A client that "+
+				"falls so far behind that events are dropped for it has its stream "+
+				"closed; it should reconnect, re-report its current session, which "+
+				"re-delivers pending prompts, and re-read the state it shows.").
 			Tags("workspaces").
 			PathParam("id", "Workspace ID").
 			RequiredQueryParam("client_id", "Client ID (UUID)").
@@ -302,21 +307,13 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Fails(404, 500).
 			Handle(c.handlePostWorkspaceLSPStopAll),
 
-		apigen.Get("/v1/workspaces/{id}/permissions/skip").
-			Summary("Get skip permissions status").
+		apigen.Post("/v1/workspaces/{id}/permissions/mode").
+			Summary("Set permission mode").
 			Tags("permissions").
 			PathParam("id", "Workspace ID").
-			Responds(proto.PermissionSkipRequest{}).
-			Fails(404, 500).
-			Handle(c.handleGetWorkspacePermissionsSkip),
-
-		apigen.Post("/v1/workspaces/{id}/permissions/skip").
-			Summary("Set skip permissions").
-			Tags("permissions").
-			PathParam("id", "Workspace ID").
-			Accepts(proto.PermissionSkipRequest{}).
+			Accepts(proto.PermissionSetModeRequest{}).
 			Fails(400, 404, 500).
-			Handle(c.handlePostWorkspacePermissionsSkip),
+			Handle(c.handlePostWorkspacePermissionsMode),
 
 		apigen.Post("/v1/workspaces/{id}/permissions/grant").
 			Summary("Grant permission").
@@ -326,6 +323,18 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Responds(proto.PermissionGrantResponse{}).
 			Fails(400, 404, 500).
 			Handle(c.handlePostWorkspacePermissionsGrant),
+
+		apigen.Post("/v1/workspaces/{id}/sessions/{sid}/auto-approve").
+			Summary("Auto-approve a session's permissions").
+			Description("Grants every permission request the session raises from "+
+				"now on without prompting, as `crush run` does for its own session. "+
+				"Other sessions keep prompting. The approval lasts while the "+
+				"workspace is hosted.").
+			Tags("permissions").
+			PathParam("id", "Workspace ID").
+			PathParam("sid", "Session ID").
+			Fails(404, 500).
+			Handle(c.handlePostWorkspaceSessionAutoApprove),
 
 		apigen.Post("/v1/workspaces/{id}/questions/answer").
 			Summary("Answer question batch").
@@ -338,11 +347,50 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 
 		apigen.Post("/v1/workspaces/{id}/questions/cancel").
 			Summary("Cancel question batch").
+			Description("Cancels the batch the body names. Without a body "+
+				"it cancels the only pending batch, and nothing when "+
+				"several are pending.").
 			Tags("questions").
 			PathParam("id", "Workspace ID").
+			Accepts(proto.QuestionCancel{}).
 			Responds(proto.QuestionAnswerResponse{}).
 			Fails(400, 404, 500).
 			Handle(c.handlePostWorkspaceQuestionsCancel),
+
+		apigen.Post("/v1/workspaces/{id}/pinentry/answer").
+			Summary("Answer pinentry prompt").
+			Tags("pinentry").
+			PathParam("id", "Workspace ID").
+			Accepts(proto.PinentryAnswer{}).
+			Responds(proto.PinentryResponse{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspacePinentryAnswer),
+
+		apigen.Post("/v1/workspaces/{id}/pinentry/cancel").
+			Summary("Cancel pinentry prompt").
+			Tags("pinentry").
+			PathParam("id", "Workspace ID").
+			Accepts(proto.PinentryCancel{}).
+			Responds(proto.PinentryResponse{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspacePinentryCancel),
+		apigen.Post("/v1/workspaces/{id}/ssh/answer").
+			Summary("Answer SSH prompt").
+			Tags("ssh").
+			PathParam("id", "Workspace ID").
+			Accepts(proto.SSHAnswer{}).
+			Responds(proto.SSHResponse{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspaceSSHAnswer),
+
+		apigen.Post("/v1/workspaces/{id}/ssh/cancel").
+			Summary("Cancel SSH prompt").
+			Tags("ssh").
+			PathParam("id", "Workspace ID").
+			Accepts(proto.SSHCancel{}).
+			Responds(proto.SSHResponse{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspaceSSHCancel),
 
 		apigen.Get("/v1/workspaces/{id}/agent").
 			Summary("Get agent info").
@@ -718,5 +766,37 @@ func (c *controllerV1) endpoints() []apigen.Endpoint {
 			Accepts(proto.MCPNameRequest{}).
 			Fails(400, 404, 500).
 			Handle(c.handlePostWorkspaceMCPStartServer),
+
+		apigen.Get("/v1/workspaces/{id}/skills/disabled").
+			Summary("List disabled skills").
+			Tags("skills").
+			PathParam("id", "Workspace ID").
+			Responds([]string{}).
+			Fails(404, 500).
+			Handle(c.handleGetWorkspaceSkillsDisabled),
+
+		apigen.Post("/v1/workspaces/{id}/skills/disabled").
+			Summary("Toggle a skill for the repository").
+			Tags("skills").
+			PathParam("id", "Workspace ID").
+			Accepts(proto.SkillSetDisabledRequest{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspaceSetSkillDisabled),
+
+		apigen.Get("/v1/workspaces/{id}/skills/enabled").
+			Summary("List enabled-override skills").
+			Tags("skills").
+			PathParam("id", "Workspace ID").
+			Responds([]string{}).
+			Fails(404, 500).
+			Handle(c.handleGetWorkspaceSkillsEnabled),
+
+		apigen.Post("/v1/workspaces/{id}/skills/config-disabled").
+			Summary("Toggle a skill in the config").
+			Tags("skills").
+			PathParam("id", "Workspace ID").
+			Accepts(proto.SkillSetDisabledRequest{}).
+			Fails(400, 404, 500).
+			Handle(c.handlePostWorkspaceSetSkillConfigDisabled),
 	}
 }

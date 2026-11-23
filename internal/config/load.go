@@ -237,6 +237,11 @@ func migrateCatwalkV2Model(model map[string]any) bool {
 // Load loads the configuration from the default paths and returns a
 // ConfigStore that owns both the pure-data Config and all runtime state.
 func Load(ctx context.Context, workingDir, dataDir string, debug bool) (*ConfigStore, error) {
+	// The CRUSH_DATA_DIR env var overrides the per-project data directory
+	// when no --data-dir flag is given. Relative paths resolve against the
+	// working directory, like the data_directory config option.
+	dataDir = cmp.Or(dataDir, os.Getenv("CRUSH_DATA_DIR"))
+
 	// Migrate deprecated disable_notifications before loading config.
 	migrateDisableNotifications()
 
@@ -284,7 +289,11 @@ func Load(ctx context.Context, workingDir, dataDir string, debug bool) (*ConfigS
 		return nil, fmt.Errorf("invalid hook configuration: %w", err)
 	}
 
-	if !isInsideWorktree() {
+	if err := cfg.ValidatePrompts(); err != nil {
+		return nil, fmt.Errorf("invalid prompt configuration: %w", err)
+	}
+
+	if !isInsideWorktree(workingDir) {
 		const depth = 2
 		const items = 100
 		slog.Warn("No git repository detected in working directory, will limit file walk operations", "depth", depth, "items", items)
@@ -337,7 +346,7 @@ func Load(ctx context.Context, workingDir, dataDir string, debug bool) (*ConfigS
 
 	env := env.New()
 	// Configure providers
-	valueResolver := NewShellVariableResolver(env)
+	valueResolver := NewShellVariableResolver(env, WithWorkingDir(workingDir))
 	store.resolver = valueResolver
 
 	// Hold writeMu during initial load to prevent configureProviders
@@ -998,92 +1007,11 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 
 	largeModelSelected, largeModelConfigured := cfg.Models[SelectedModelTypeLarge]
 	if largeModelConfigured {
-		if largeModelSelected.Model != "" {
-			large.Model = largeModelSelected.Model
-		}
-		if largeModelSelected.Provider != "" {
-			large.Provider = largeModelSelected.Provider
-		}
-		model := cfg.GetModel(large.Provider, large.Model)
-		if model == nil {
-			large = defaultLarge
-			result.LargeFallback = true
-		} else {
-			if largeModelSelected.MaxTokens > 0 {
-				large.MaxTokens = largeModelSelected.MaxTokens
-			} else {
-				large.MaxTokens = model.DefaultMaxTokens
-			}
-			if largeModelSelected.ReasoningEffort != "" {
-				large.ReasoningEffort = largeModelSelected.ReasoningEffort
-			} else {
-				large.ReasoningEffort = model.Reasoning.DefaultEffortLevel
-			}
-			large.Think = largeModelSelected.Think
-			if largeModelSelected.Temperature != nil {
-				large.Temperature = largeModelSelected.Temperature
-			}
-			if largeModelSelected.TopP != nil {
-				large.TopP = largeModelSelected.TopP
-			}
-			if largeModelSelected.TopK != nil {
-				large.TopK = largeModelSelected.TopK
-			}
-			if largeModelSelected.FrequencyPenalty != nil {
-				large.FrequencyPenalty = largeModelSelected.FrequencyPenalty
-			}
-			if largeModelSelected.PresencePenalty != nil {
-				large.PresencePenalty = largeModelSelected.PresencePenalty
-			}
-			if largeModelSelected.ProviderOptions != nil {
-				large.ProviderOptions = maps.Clone(largeModelSelected.ProviderOptions)
-			}
-		}
+		large, result.LargeFallback = applySelection(cfg, defaultLarge, largeModelSelected)
 	}
-	smallModelSelected, smallModelConfigured := cfg.Models[SelectedModelTypeSmall]
+	_, smallModelConfigured := cfg.Models[SelectedModelTypeSmall]
 	if smallModelConfigured {
-		if smallModelSelected.Model != "" {
-			small.Model = smallModelSelected.Model
-		}
-		if smallModelSelected.Provider != "" {
-			small.Provider = smallModelSelected.Provider
-		}
-
-		model := cfg.GetModel(small.Provider, small.Model)
-		if model == nil {
-			small = defaultSmall
-			result.SmallFallback = true
-		} else {
-			if smallModelSelected.MaxTokens > 0 {
-				small.MaxTokens = smallModelSelected.MaxTokens
-			} else {
-				small.MaxTokens = model.DefaultMaxTokens
-			}
-			if smallModelSelected.ReasoningEffort != "" {
-				small.ReasoningEffort = smallModelSelected.ReasoningEffort
-			} else {
-				small.ReasoningEffort = model.Reasoning.DefaultEffortLevel
-			}
-			if smallModelSelected.Temperature != nil {
-				small.Temperature = smallModelSelected.Temperature
-			}
-			if smallModelSelected.TopP != nil {
-				small.TopP = smallModelSelected.TopP
-			}
-			if smallModelSelected.TopK != nil {
-				small.TopK = smallModelSelected.TopK
-			}
-			if smallModelSelected.FrequencyPenalty != nil {
-				small.FrequencyPenalty = smallModelSelected.FrequencyPenalty
-			}
-			if smallModelSelected.PresencePenalty != nil {
-				small.PresencePenalty = smallModelSelected.PresencePenalty
-			}
-			if smallModelSelected.ProviderOptions != nil {
-				small.ProviderOptions = maps.Clone(smallModelSelected.ProviderOptions)
-			}
-			small.Think = smallModelSelected.Think
-		}
+		small, result.SmallFallback = applySelection(cfg, defaultSmall, cfg.Models[SelectedModelTypeSmall])
 	}
 
 	// When small isn't explicitly configured and the provider isn't a
@@ -1107,6 +1035,48 @@ func resolveSelectedModels(cfg *Config, knownProviders []catwalk.Provider) (reso
 	result.Large = large
 	result.Small = small
 	return result, nil
+}
+
+// applySelection overlays a configured selection onto def. It reports a
+// fallback, returning def unchanged, when the selection names no known model.
+func applySelection(cfg *Config, def, sel SelectedModel) (SelectedModel, bool) {
+	out := def
+	out.Model = cmp.Or(sel.Model, def.Model)
+	out.Provider = cmp.Or(sel.Provider, def.Provider)
+	model := cfg.GetModel(out.Provider, out.Model)
+	if model == nil {
+		return def, true
+	}
+
+	out.MaxTokens = model.DefaultMaxTokens
+	if sel.MaxTokens > 0 {
+		out.MaxTokens = sel.MaxTokens
+	}
+
+	// A selection layered over another model's can hold reasoning options
+	// this one rejects, so they only apply to a model that reasons.
+	out.ReasoningEffort, out.Think = "", false
+	if model.CanReason() {
+		out.ReasoningEffort = cmp.Or(sel.ReasoningEffort, model.Reasoning.DefaultEffortLevel)
+		out.Think = sel.Think
+	} else if sel.Think || sel.ReasoningEffort != "" {
+		slog.Warn(
+			"Ignoring reasoning options for a model that does not declare reasoning support",
+			"provider", out.Provider,
+			"model", out.Model,
+			"hint", `set "reasoning": {"thinking": "toggleable"} on the model if it reasons`,
+		)
+	}
+
+	out.Temperature = cmp.Or(sel.Temperature, out.Temperature)
+	out.TopP = cmp.Or(sel.TopP, out.TopP)
+	out.TopK = cmp.Or(sel.TopK, out.TopK)
+	out.FrequencyPenalty = cmp.Or(sel.FrequencyPenalty, out.FrequencyPenalty)
+	out.PresencePenalty = cmp.Or(sel.PresencePenalty, out.PresencePenalty)
+	if sel.ProviderOptions != nil {
+		out.ProviderOptions = maps.Clone(sel.ProviderOptions)
+	}
+	return out, false
 }
 
 // lookupConfigs searches config files starting at cwd and walking up
@@ -1185,6 +1155,7 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 				if !json.Valid(jsonBytes) {
 					return nil, nil, fmt.Errorf("shell config %s produced invalid JSON", path)
 				}
+				jsonBytes = anchorPromptPaths(jsonBytes, dir)
 				addTopLevelKeys(shDirKeys, dir, jsonBytes)
 				configs = append(configs, jsonBytes)
 				loaded = append(loaded, path)
@@ -1194,6 +1165,7 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 				return nil, nil, fmt.Errorf("invalid JSON in config file %s", path)
 			}
 			data = migrateCatwalkV2File(path, data)
+			data = anchorPromptPaths(data, dir)
 			addTopLevelKeys(jsonDirKeys, dir, data)
 			configs = append(configs, data)
 			loaded = append(loaded, path)
@@ -1226,6 +1198,29 @@ func loadFromConfigPaths(ctx context.Context, configPaths []string) (*Config, []
 		return nil, nil, err
 	}
 	return cfg, loaded, nil
+}
+
+// anchorPromptPaths makes the relative options.prompts paths in one config
+// file absolute against that file's directory, before the files merge and
+// lose track of where each path came from. Otherwise a relative path in the
+// global config would point at a different file in every project. Paths
+// starting with ~ or $ are left for expansion when the prompt is read.
+func anchorPromptPaths(data []byte, dir string) []byte {
+	gjson.GetBytes(data, "options.prompts").ForEach(func(name, path gjson.Result) bool {
+		p := path.String()
+		if p == "" || strings.HasPrefix(p, "~") || strings.HasPrefix(p, "$") || filepathext.SmartIsAbs(p) {
+			return true
+		}
+		abs, err := filepath.Abs(filepath.Join(dir, p))
+		if err != nil {
+			return true
+		}
+		if out, err := sjson.SetBytes(data, "options.prompts."+gjson.Escape(name.String()), abs); err == nil {
+			data = out
+		}
+		return true
+	})
+	return data
 }
 
 // addTopLevelKeys records the top-level JSON keys present in data into the
@@ -1470,12 +1465,17 @@ func assignIfNil[T any](ptr **T, val T) {
 	}
 }
 
-func isInsideWorktree() bool {
-	bts, err := exec.CommandContext(
+// isInsideWorktree reports whether dir is inside a git working tree. It
+// checks dir rather than the process working directory, which a server
+// shares across every workspace it hosts.
+func isInsideWorktree(dir string) bool {
+	cmd := exec.CommandContext(
 		context.Background(),
 		"git", "rev-parse",
 		"--is-inside-work-tree",
-	).CombinedOutput()
+	)
+	cmd.Dir = dir
+	bts, err := cmd.CombinedOutput()
 	return err == nil && strings.TrimSpace(string(bts)) == "true"
 }
 
@@ -1603,3 +1603,23 @@ func ProjectSkillsDir(workingDir string) []string {
 }
 
 func isAppleTerminal() bool { return os.Getenv("TERM_PROGRAM") == "Apple_Terminal" }
+
+// ValidatePrompts rejects prompt names that do not name a built-in prompt, so
+// a typo fails at startup instead of silently leaving the built-in in place.
+func (c *Config) ValidatePrompts() error {
+	if c.Options == nil {
+		return nil
+	}
+	return ValidatePromptNames(c.Options.Prompts)
+}
+
+// ValidatePromptNames rejects any key in prompts that is not a built-in
+// prompt name. Config files and the --prompt flag both go through it.
+func ValidatePromptNames(prompts PromptPaths) error {
+	for _, name := range slices.Sorted(maps.Keys(prompts)) {
+		if !slices.Contains(PromptNames, name) {
+			return fmt.Errorf("unknown prompt %q, expected one of %s", name, strings.Join(PromptNames, ", "))
+		}
+	}
+	return nil
+}

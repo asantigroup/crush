@@ -26,6 +26,9 @@ const (
 	ModelIcon       string = "◇"
 	HypercreditIcon string = "◆"
 
+	// GitBranchIcon is the Powerline branch glyph, shown only with Nerd Fonts.
+	GitBranchIcon string = "\ue0a0"
+
 	ArrowRightIcon string = "→"
 
 	// CodespanPadding is the padding rendered around inline code spans in
@@ -74,10 +77,17 @@ const (
 	ScrollbarThumb string = "┃"
 	ScrollbarTrack string = "│"
 
-	LSPErrorIcon   string = "E"
-	LSPWarningIcon string = "W"
-	LSPInfoIcon    string = "I"
-	LSPHintIcon    string = "H"
+	ChannelIcon string = "↳"
+
+	// LSP severity icons are Nerd Font glyphs, shown only when the terminal
+	// is expected to render them. Each glyph carries a trailing space as a
+	// separator from the count that follows it. Terminals without Nerd
+	// Font support fall back to the letters E, W, I, and H through
+	// nerdfont.Glyph at the call sites, which supply their own spacing.
+	LSPErrorIcon   string = "\U000F0159 " // nf-md-close_circle
+	LSPWarningIcon string = "\U000F0028 " // nf-md-alert
+	LSPInfoIcon    string = "\U000F02FC " // nf-md-information
+	LSPHintIcon    string = "\U000F0335 " // nf-md-bug_outline
 )
 
 const (
@@ -197,6 +207,12 @@ type Styles struct {
 		QuestionRadioOff   lipgloss.Style // Unselected single-choice radio.
 		QuestionCheckOn    lipgloss.Style // Checked multi-choice indicator.
 		QuestionCheckOff   lipgloss.Style // Unchecked multi-choice indicator.
+
+		// Sysadmin mode prompt (" # " icon + ":::" dots).
+		PromptSysadminIconFocused lipgloss.Style
+		PromptSysadminIconBlurred lipgloss.Style
+		PromptSysadminDotsFocused lipgloss.Style
+		PromptSysadminDotsBlurred lipgloss.Style
 	}
 
 	// Radio
@@ -219,6 +235,12 @@ type Styles struct {
 
 	// Background
 	Background color.Color
+
+	// Exit banner
+	ExitBanner struct {
+		Text  lipgloss.Style // Parting message, session title, and resume command
+		Label lipgloss.Style // Session and Continue labels
+	}
 
 	// Logo
 	Logo struct {
@@ -292,6 +314,7 @@ type Styles struct {
 		Name            lipgloss.Style // Resource name (e.g. "gopls")
 		StatusText      lipgloss.Style // Row status description (e.g. "starting...")
 		OfflineIcon     lipgloss.Style // Offline/unstarted/stopped status icon
+		WorkingIcon     lipgloss.Style // In-progress icon style with no preset glyph
 		DisabledIcon    lipgloss.Style // Disabled status icon
 		BusyIcon        lipgloss.Style // Busy/starting status icon
 		ErrorIcon       lipgloss.Style // Error status icon
@@ -341,7 +364,8 @@ type Styles struct {
 		ShellOutput        lipgloss.Style // Plain output text.
 		ShellExitCode      lipgloss.Style // Non-zero exit code indicator.
 		ShellTruncation    lipgloss.Style // "N more lines" hint.
-		SectionHeader      lipgloss.Style
+
+		SectionHeader lipgloss.Style
 
 		// Plan section styles
 		PlanBox lipgloss.Style // Border+padding for the final plan message
@@ -357,6 +381,12 @@ type Styles struct {
 		AssistantInfoDuration  lipgloss.Style
 		SubduedHypercreditIcon lipgloss.Style // Subdued ◆ for hypercredit figures within subdued text
 		AssistantCanceled      lipgloss.Style // Italic "Canceled" footer
+
+		// Channel message metadata line styles.
+		ChannelInfoIcon      lipgloss.Style // Chat-bubble glyph prefix
+		ChannelInfoSender    lipgloss.Style // Sender name in channel metadata line
+		ChannelInfoProvider  lipgloss.Style // "via <channel>" text
+		ChannelInfoTimestamp lipgloss.Style // "at <timestamp>" text
 	}
 
 	// Tool - styles for tool call rendering
@@ -372,8 +402,9 @@ type Styles struct {
 		NameNested lipgloss.Style // Nested child tool name (inside Agent/Agentic Fetch)
 
 		// Parameter list styles
-		ParamMain lipgloss.Style
-		ParamKey  lipgloss.Style
+		ParamMain   lipgloss.Style
+		ParamKey    lipgloss.Style
+		Description lipgloss.Style // A tool's own summary of what it is doing
 
 		// Content rendering styles
 		ContentLine           lipgloss.Style // Individual content line with background and width
@@ -419,6 +450,9 @@ type Styles struct {
 		// Agent task styles
 		AgentTaskTag lipgloss.Style // Agent task tag (blue background, bold)
 		AgentPrompt  lipgloss.Style // Agent prompt text
+		AgentName    lipgloss.Style // Subagent first name
+		AgentLabel   lipgloss.Style // Label a subagent was dispatched with, after its first name
+		AgentMessage lipgloss.Style // Message sent to a subagent
 
 		// Agentic fetch styles
 		AgenticFetchPromptTag lipgloss.Style // Agentic fetch prompt tag (green background, bold)
@@ -496,6 +530,17 @@ type Styles struct {
 		SelectedItem lipgloss.Style
 		InputPrompt  lipgloss.Style
 
+		// PromptMessage is the friendly description of what an
+		// integrated credential prompt (GPG pinentry) is asking for.
+		PromptMessage lipgloss.Style
+		// PromptKey styles the labeled key rows shown under it.
+		PromptKey lipgloss.Style
+		// SSHMessage is the friendly description of what an integrated
+		// SSH askpass prompt is asking for.
+		SSHMessage lipgloss.Style
+		// SSHKey styles the labeled account/key row shown under it.
+		SSHKey lipgloss.Style
+
 		List lipgloss.Style
 
 		Spinner lipgloss.Style
@@ -538,6 +583,7 @@ type Styles struct {
 		Quit struct {
 			Content lipgloss.Style // Wrapper for the quit dialog's inner content
 			Hint    lipgloss.Style // Style for quit hint
+			Warning lipgloss.Style // Style for the work-in-progress warning
 			Frame   lipgloss.Style // Outer rounded border framing the quit dialog
 		}
 
@@ -596,14 +642,17 @@ type Styles struct {
 		Help lipgloss.Style
 
 		// Mode badges shown before the help hints.
-		ModeBadgePlan lipgloss.Style
-		ModeBadgeYolo lipgloss.Style
+		ModeBadgePlan     lipgloss.Style
+		ModeBadgeYolo     lipgloss.Style
+		ModeBadgeSysadmin lipgloss.Style
 
 		// Full-width banners shown when switching modes.
-		ModeBannerPlan      lipgloss.Style
-		ModeBannerPlanBadge lipgloss.Style
-		ModeBannerYolo      lipgloss.Style
-		ModeBannerYoloBadge lipgloss.Style
+		ModeBannerPlan          lipgloss.Style
+		ModeBannerPlanBadge     lipgloss.Style
+		ModeBannerYolo          lipgloss.Style
+		ModeBannerYoloBadge     lipgloss.Style
+		ModeBannerSysadmin      lipgloss.Style
+		ModeBannerSysadminBadge lipgloss.Style
 
 		ErrorIndicator   lipgloss.Style
 		WarnIndicator    lipgloss.Style

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -447,7 +448,7 @@ func TestPathDedupe_DifferentPaths_DifferentWorkspaces(t *testing.T) {
 
 // TestPathDedupe_FirstWinsKeepsOriginalEnv verifies that the second
 // create at the same path returns the *originating* client's Env in
-// its proto and does not mutate the existing workspace's YOLO/Debug
+// its proto and does not mutate the existing workspace's PermissionMode/Debug
 // flags.
 func TestPathDedupe_FirstWinsKeepsOriginalEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
@@ -464,23 +465,23 @@ func TestPathDedupe_FirstWinsKeepsOriginalEnv(t *testing.T) {
 
 	originalEnv := []string{"FOO=bar"}
 	argsA := protoWS(cwd, dataDir, uuid.New().String())
-	argsA.YOLO = true
+	argsA.PermissionMode = proto.WorkspacePermissionModeYolo
 	argsA.Env = originalEnv
 	wsA, protoA, err := b.CreateWorkspace(argsA)
 	require.NoError(t, err)
-	require.True(t, protoA.YOLO)
+	require.Equal(t, proto.WorkspacePermissionModeYolo, protoA.PermissionMode)
 	require.Equal(t, originalEnv, protoA.Env)
 
 	argsB := protoWS(cwd, dataDir, uuid.New().String())
-	argsB.YOLO = false
+	argsB.PermissionMode = proto.WorkspacePermissionModeNormal
 	argsB.Debug = true
 	argsB.Env = []string{"BAZ=qux"}
 	_, protoB, err := b.CreateWorkspace(argsB)
 	require.NoError(t, err)
 	require.Equal(t, protoA.ID, protoB.ID)
-	require.True(t, protoB.YOLO, "first wins: YOLO must remain true")
+	require.Equal(t, proto.WorkspacePermissionModeYolo, protoB.PermissionMode, "first wins: PermissionMode must remain yolo")
 	require.Equal(t, originalEnv, protoB.Env, "proto must carry the originating client's Env")
-	require.Equal(t, wsA.Cfg.Overrides().SkipPermissionRequests, true)
+	require.Equal(t, permission.PermissionModeYolo, wsA.Cfg.Overrides().PermissionMode)
 }
 
 // TestPathDedupe_Symlink confirms two paths that resolve to the same
@@ -608,6 +609,28 @@ func TestPathDedupe_ParallelCreates(t *testing.T) {
 	require.Contains(t, ws.clients, cidB)
 }
 
+// TestPathDedupe_CaseVariant guards against one directory opened under
+// two spellings that differ only in case becoming two workspaces, the
+// second failing on the data-directory lock the first holds.
+func TestPathDedupe_CaseVariant(t *testing.T) {
+	xdgIsolated(t)
+	t.Setenv("CRUSH_DISABLE_PROVIDER_AUTO_UPDATE", "1")
+	root := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(root, "Proj"), 0o755))
+	if _, err := os.Stat(filepath.Join(root, "proj")); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	b := New(context.Background(), nil, func() {})
+	b.SetCreateGrace(2 * time.Second)
+	t.Cleanup(func() { drainBackend(t, b) })
+
+	wsA, _, err := b.CreateWorkspace(protoWS(filepath.Join(root, "Proj"), "", uuid.NewString()))
+	require.NoError(t, err)
+	wsB, _, err := b.CreateWorkspace(protoWS(filepath.Join(root, "proj"), "", uuid.NewString()))
+	require.NoError(t, err)
+	require.Equal(t, wsA.ID, wsB.ID)
+}
+
 // TestCreateWorkspace_RejectsBadClientID covers the 400 path from the
 // backend side.
 func TestCreateWorkspace_RejectsBadClientID(t *testing.T) {
@@ -687,7 +710,7 @@ func xdgIsolated(t *testing.T) {
 }
 
 // TestFirstWinsMismatch_LogsOnFlagDifferences verifies that the
-// debug mismatch line is emitted when any of YOLO, Debug, DataDir,
+// debug mismatch line is emitted when any of PermissionMode, Debug, DataDir,
 // or Env differs between the first and second CreateWorkspace at
 // the same path, and that the existing workspace's Debug flag is
 // not overwritten.
@@ -698,7 +721,7 @@ func TestFirstWinsMismatch_LogsOnFlagDifferences(t *testing.T) {
 	}{
 		{
 			name:   "yolo",
-			mutate: func(p *proto.Workspace) { p.YOLO = true },
+			mutate: func(p *proto.Workspace) { p.PermissionMode = proto.WorkspacePermissionModeYolo },
 		},
 		{
 			name:   "debug",
@@ -730,7 +753,7 @@ func TestFirstWinsMismatch_LogsOnFlagDifferences(t *testing.T) {
 			wsA, _, err := b.CreateWorkspace(argsA)
 			require.NoError(t, err)
 			originalDebug := wsA.Cfg.Config().Options.Debug
-			originalYOLO := wsA.Cfg.Overrides().SkipPermissionRequests
+			originalMode := wsA.Cfg.Overrides().PermissionMode
 
 			argsB := protoWS(cwd, dataDir, uuid.New().String())
 			argsB.Env = []string{"FOO=bar"} // identical by default
@@ -743,8 +766,8 @@ func TestFirstWinsMismatch_LogsOnFlagDifferences(t *testing.T) {
 				"Workspace flag mismatch on duplicate create",
 				"expected debug log for mismatching %s", tc.name,
 			)
-			// Existing workspace's YOLO and Debug must not change.
-			require.Equal(t, originalYOLO, wsA.Cfg.Overrides().SkipPermissionRequests, "YOLO must be immutable on first-wins")
+			// Existing workspace's PermissionMode and Debug must not change.
+			require.Equal(t, originalMode, wsA.Cfg.Overrides().PermissionMode, "PermissionMode must be immutable on first-wins")
 			require.Equal(t, originalDebug, wsA.Cfg.Config().Options.Debug, "Debug must be immutable on first-wins")
 		})
 	}
@@ -1846,4 +1869,37 @@ func TestShutdownWorkspaces_GivesUpAtDeadline(t *testing.T) {
 	defer cancel()
 	require.ErrorIs(t, b.ShutdownWorkspaces(ctx), context.DeadlineExceeded)
 	require.Zero(t, b.workspaces.Len())
+}
+
+// TestShutdownWorkspaces_WaitsForTeardownInFlight guards against a stop
+// returning while a workspace that already left the index is still being
+// torn down by its expired detach grace.
+func TestShutdownWorkspaces_WaitsForTeardownInFlight(t *testing.T) {
+	t.Parallel()
+	b, _ := newTestBackend(t)
+	b.SetDetachGrace(10 * time.Millisecond)
+	b.SetIdleShutdownDelay(time.Hour)
+	ws, _ := insertTestWorkspace(t, b, "/tmp/tearing-down")
+	started, release := make(chan struct{}), make(chan struct{})
+	open := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(open)
+	var finished atomic.Bool
+	ws.shutdownFn = func() {
+		close(started)
+		<-release
+		finished.Store(true)
+	}
+
+	cid := newClientID(t)
+	b.registerClient(ws, cid)
+	require.NoError(t, b.AttachClient(ws.ID, cid))
+	b.DetachClient(ws.ID, cid)
+	<-started
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, b.ShutdownWorkspaces(ctx), context.DeadlineExceeded)
+	open()
+	require.NoError(t, b.ShutdownWorkspaces(t.Context()))
+	require.True(t, finished.Load(), "the stop returned before the teardown finished")
 }

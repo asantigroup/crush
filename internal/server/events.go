@@ -8,17 +8,20 @@ import (
 	"log/slog"
 
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/app"
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/history"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/pinentry"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/sshaskpass"
 )
 
 // wrapEvent converts a raw tea.Msg (a pubsub.Event[T] from the app
@@ -71,6 +74,7 @@ func wrapEvent(ev any) *pubsub.Payload {
 				Action:      e.Payload.Action,
 				Path:        e.Payload.Path,
 				Params:      e.Payload.Params,
+				Danger:      e.Payload.Danger,
 			},
 		})
 	case pubsub.Event[permission.PermissionNotification]:
@@ -82,6 +86,13 @@ func wrapEvent(ev any) *pubsub.Payload {
 				Granted:    e.Payload.Granted,
 				Denied:     e.Payload.Denied,
 				Cancelled:  e.Payload.Cancelled,
+			},
+		})
+	case pubsub.Event[permission.ModeChangedEvent]:
+		return envelope(pubsub.PayloadTypePermissionModeChanged, pubsub.Event[proto.PermissionModeEvent]{
+			Type: e.Type,
+			Payload: proto.PermissionModeEvent{
+				Mode: proto.PermissionModeToProto(e.Payload.Mode),
 			},
 		})
 	case pubsub.Event[question.Request]:
@@ -105,6 +116,49 @@ func wrapEvent(ev any) *pubsub.Payload {
 				SessionID: e.Payload.SessionID,
 			},
 		})
+	case pubsub.Event[pinentry.PromptRequest]:
+		return envelope(pubsub.PayloadTypePinentryPromptRequest, pubsub.Event[proto.PinentryPromptRequest]{
+			Type: e.Type,
+			Payload: proto.PinentryPromptRequest{
+				ID:     e.Payload.ID,
+				Prompt: e.Payload.Prompt,
+				Key: proto.PinentryKey{
+					CardNumber:  e.Payload.Key.CardNumber,
+					KeyID:       e.Payload.Key.KeyID,
+					Fingerprint: e.Payload.Key.Fingerprint,
+					Holder:      e.Payload.Key.Holder,
+				},
+				Kind:       string(e.Payload.Kind),
+				RetryCount: e.Payload.RetryCount,
+				Error:      e.Payload.Error,
+			},
+		})
+	case pubsub.Event[pinentry.Notification]:
+		return envelope(pubsub.PayloadTypePinentryNotification, pubsub.Event[proto.PinentryNotification]{
+			Type: e.Type,
+			Payload: proto.PinentryNotification{
+				RequestID: e.Payload.RequestID,
+			},
+		})
+	case pubsub.Event[sshaskpass.PromptRequest]:
+		return envelope(pubsub.PayloadTypeSSHPromptRequest, pubsub.Event[proto.SSHPromptRequest]{
+			Type: e.Type,
+			Payload: proto.SSHPromptRequest{
+				ID:      e.Payload.ID,
+				Prompt:  e.Payload.Prompt,
+				KeyInfo: e.Payload.KeyInfo,
+				Kind:    string(e.Payload.Kind),
+				Title:   e.Payload.Title,
+				Message: e.Payload.Message,
+			},
+		})
+	case pubsub.Event[sshaskpass.Notification]:
+		return envelope(pubsub.PayloadTypeSSHNotification, pubsub.Event[proto.SSHNotification]{
+			Type: e.Type,
+			Payload: proto.SSHNotification{
+				RequestID: e.Payload.RequestID,
+			},
+		})
 	case pubsub.Event[message.Message]:
 		return envelope(pubsub.PayloadTypeMessage, pubsub.Event[proto.Message]{
 			Type:    e.Type,
@@ -126,6 +180,7 @@ func wrapEvent(ev any) *pubsub.Payload {
 			SessionTitle: e.Payload.SessionTitle,
 			RunID:        e.Payload.RunID,
 			Type:         proto.AgentEventType(e.Payload.Type),
+			ProviderID:   e.Payload.ProviderID,
 			AWSSOCommand: e.Payload.AWSSOCommand,
 			AWSSOURL:     e.Payload.AWSSOURL,
 		}
@@ -174,19 +229,27 @@ func wrapEvent(ev any) *pubsub.Payload {
 			Type:    e.Type,
 			Payload: skillsEventToProto(e.Payload),
 		})
+	case pubsub.Event[pinentry.Event]:
+		// Terminal handover for GPG passphrase prompts is a local concern
+		// of the host running the watcher; the pinentry dialog would not
+		// draw on a remote client's terminal.
+		return nil
+	case pubsub.Event[tools.ToolProgress]:
+		return envelope(pubsub.PayloadTypeToolProgress, pubsub.Event[proto.ToolProgress]{
+			Type:    e.Type,
+			Payload: proto.ToolProgress(e.Payload),
+		})
 	default:
 		slog.Warn("Unrecognized event type for SSE wrapping", "type", fmt.Sprintf("%T", ev))
 		return nil
 	}
 }
 
-// sessionScopedEventID extracts the session ID from events that
-// belong to a single session's interactive prompts (permission and
-// question requests and their resolution notifications). The second
-// return value reports whether the event is session-scoped at all. An
-// event whose session ID is empty is treated as unscoped: it cannot
-// match any client's current session, so scoping it would drop it for
-// everyone.
+// sessionScopedEventID extracts the session ID from events that belong to a
+// single session (interactive prompts and live tool progress). The second
+// return value reports whether the event is session-scoped at all. An event
+// whose session ID is empty is treated as unscoped: it cannot match any
+// client's current session, so scoping it would drop it for everyone.
 func sessionScopedEventID(ev any) (string, bool) {
 	var id string
 	switch e := ev.(type) {
@@ -197,6 +260,8 @@ func sessionScopedEventID(ev any) (string, bool) {
 	case pubsub.Event[question.Request]:
 		id = e.Payload.SessionID
 	case pubsub.Event[question.Notification]:
+		id = e.Payload.SessionID
+	case pubsub.Event[tools.ToolProgress]:
 		id = e.Payload.SessionID
 	default:
 		return "", false
@@ -209,7 +274,7 @@ func sessionScopedEventID(ev any) (string, bool) {
 // only delivered to clients currently viewing the session that raised
 // them: a permission dialog or question form is only actionable there,
 // and broadcasting it to every client in the workspace lets sessions
-// steal each other's prompts. Prompts raised by sub-agent sessions
+// steal each other's prompts. Prompts raised by subagent sessions
 // (agent tool, agentic fetch) resolve to the top-level session so the
 // viewer of the parent session can answer them. Clients on the landing
 // screen (an explicitly cleared session) receive no prompts, while
@@ -300,10 +365,11 @@ func sessionToProto(s session.Session) proto.Session {
 // unconditionally — the workspace lookup error is already surfaced by
 // the prior ListSessions/GetSession call when relevant.
 func isSessionBusy(ws *backend.Workspace, sessionID string) bool {
-	if ws == nil || ws.App == nil || ws.AgentCoordinator == nil {
+	if ws == nil {
 		return false
 	}
-	return ws.AgentCoordinator.IsSessionBusy(sessionID)
+	coord := ws.Coordinator()
+	return coord != nil && coord.IsSessionBusy(sessionID)
 }
 
 // attachedClients returns the number of clients currently viewing
@@ -350,6 +416,7 @@ func messageToProto(m message.Message) proto.Message {
 		SessionID:               m.SessionID,
 		Role:                    proto.MessageRole(m.Role),
 		Model:                   m.Model,
+		ModelName:               m.ModelName,
 		Provider:                m.Provider,
 		PrismModelID:            m.PrismModelID,
 		PrismModelName:          m.PrismModelName,
@@ -373,20 +440,22 @@ func messageToProto(m message.Message) proto.Message {
 			})
 		case message.ToolCall:
 			msg.Parts = append(msg.Parts, proto.ToolCall{
-				ID:       v.ID,
-				Name:     v.Name,
-				Input:    v.Input,
-				Finished: v.Finished,
+				ID:          v.ID,
+				Name:        v.Name,
+				Input:       v.Input,
+				Finished:    v.Finished,
+				StartedAtMs: v.StartedAtMs,
 			})
 		case message.ToolResult:
 			msg.Parts = append(msg.Parts, proto.ToolResult{
-				ToolCallID: v.ToolCallID,
-				Name:       v.Name,
-				Content:    v.Content,
-				Data:       v.Data,
-				MIMEType:   v.MIMEType,
-				Metadata:   v.Metadata,
-				IsError:    v.IsError,
+				ToolCallID:   v.ToolCallID,
+				Name:         v.Name,
+				Content:      v.Content,
+				Data:         v.Data,
+				MIMEType:     v.MIMEType,
+				Metadata:     v.Metadata,
+				IsError:      v.IsError,
+				FinishedAtMs: v.FinishedAtMs,
 			})
 		case message.Finish:
 			msg.Parts = append(msg.Parts, proto.Finish{
@@ -404,6 +473,13 @@ func messageToProto(m message.Message) proto.Message {
 				Command:  v.Command,
 				Output:   v.Output,
 				ExitCode: v.ExitCode,
+			})
+		case message.SubAgentReport:
+			msg.Parts = append(msg.Parts, proto.SubAgentReport{
+				Label:  v.Label,
+				Output: v.Output,
+				Failed: v.Failed,
+				Model:  v.Model,
 			})
 		}
 	}

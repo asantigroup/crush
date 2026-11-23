@@ -17,9 +17,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/catwalk/v3/pkg/catwalk"
-	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent"
 	"github.com/charmbracelet/crush/internal/agent/notify"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
 	"github.com/charmbracelet/crush/internal/clipboard"
 	"github.com/charmbracelet/crush/internal/config"
@@ -34,11 +34,13 @@ import (
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
 	"github.com/charmbracelet/crush/internal/permission"
+	"github.com/charmbracelet/crush/internal/pinentry"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/question"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
 	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/charmbracelet/crush/internal/sshaskpass"
 	"github.com/charmbracelet/crush/internal/ui/anim"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/update"
@@ -64,6 +66,7 @@ type App struct {
 	Permissions permission.Service
 	Questions   question.Service
 	FileTracker filetracker.Service
+	Pinentry    *pinentry.Service
 
 	AgentCoordinator agent.Coordinator
 
@@ -89,6 +92,7 @@ type App struct {
 	// drive their exit on a deterministic, payload-bearing event
 	// instead of guessing from message finish parts.
 	runCompletions *pubsub.Broker[notify.RunComplete]
+	toolProgress   *pubsub.Broker[tools.ToolProgress]
 
 	// herdrClient reports agent state to herdr when running inside
 	// a herdr-managed pane. Nil when not in a herdr environment.
@@ -101,6 +105,14 @@ type App struct {
 	// currentSessionID is the session the user is working in, reported
 	// by the TUI and the non-interactive runner, for SessionEnd.
 	currentSessionID atomic.Value
+
+	// agentInitMu guards AgentCoordinator creation so concurrent
+	// initializers (a client attaching while the server-side channel
+	// injection initializes a headless workspace) cannot build two
+	// coordinators for one workspace. agentInteractive records which
+	// variant the current coordinator was built with.
+	agentInitMu      sync.Mutex
+	agentInteractive bool
 }
 
 // New initializes a new application instance. skillsMgr carries the
@@ -113,7 +125,6 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	messages := message.NewService(q)
 	files := history.NewService(q, conn)
 	cfg := store.Config()
-	skipPermissionsRequests := store.Overrides().SkipPermissionRequests
 	var allowedTools []string
 	if cfg.Permissions != nil && cfg.Permissions.AllowedTools != nil {
 		allowedTools = cfg.Permissions.AllowedTools
@@ -123,13 +134,19 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		return store.Config().Hooks
 	}, store.WorkingDir(), store.WorkingDir())
 
+	permSvc := permission.NewPermissionService(store.WorkingDir(), allowedTools, permissionHooks{hookRunner})
+	if store.Overrides().PermissionMode != permission.PermissionModeNormal {
+		permSvc.SetPermissionMode(store.Overrides().PermissionMode)
+	}
+
 	app := &App{
 		Sessions:    sessions,
 		Messages:    messages,
 		History:     files,
-		Permissions: permission.NewPermissionService(store.WorkingDir(), skipPermissionsRequests, allowedTools, permissionHooks{hookRunner}),
+		Permissions: permSvc,
 		Questions:   question.NewService(),
-		FileTracker: filetracker.NewService(q),
+		FileTracker: filetracker.NewService(q, store.WorkingDir()),
+		Pinentry:    pinentry.DefaultService(),
 		LSPManager:  lsp.NewManager(store),
 		Skills:      skillsMgr,
 
@@ -138,14 +155,54 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 
 		config: store,
 
-		events:             pubsub.NewBroker[tea.Msg](),
+		events:             pubsub.NewCoalescingBroker(eventCoalesceKey),
 		serviceEventsWG:    &sync.WaitGroup{},
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
 		runCompletions:     pubsub.NewBroker[notify.RunComplete](),
+		toolProgress:       pubsub.NewCoalescingBroker(toolProgressCoalesceKey),
 	}
 
 	app.setupEvents()
+
+	// Start the pinentry watcher so terminal-based GPG passphrase prompts
+	// (pinentry-curses/pinentry-tty) get exclusive terminal access while a
+	// shell command runs. It only polls while commands are executing, and
+	// stops with the events pipeline.
+	app.Pinentry.Start(app.eventsCtx)
+
+	// Enable the integrated pinentry: GPG passphrase/PIN prompts are
+	// rendered as native dialogs (loopback pinentry) for Crush-spawned
+	// processes without touching GPG or git configuration. The
+	// terminal-handover watcher above remains the fallback.
+	if cfg.Options.GetPinentryIntegrated() {
+		if executable, err := os.Executable(); err != nil {
+			slog.Warn("Integrated pinentry unavailable", "error", err)
+		} else if cleanup, err := pinentry.StartIntegration(ctx, executable, cfg.Options.GetPinentryCacheTimeout()); err != nil {
+			slog.Warn("Integrated pinentry unavailable", "error", err)
+		} else {
+			app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+				cleanup()
+				return nil
+			})
+		}
+	}
+
+	// Enable the integrated ssh askpass: OpenSSH credential and
+	// confirmation prompts (passwords, key passphrases, security key
+	// touches) for Crush-spawned commands are rendered as native
+	// dialogs. The redirect is environment-scoped; no ssh configuration
+	// or files are modified.
+	if executable, err := os.Executable(); err != nil {
+		slog.Warn("Integrated ssh prompts unavailable", "error", err)
+	} else if cleanup, err := sshaskpass.StartIntegration(ctx, executable); err != nil {
+		slog.Warn("Integrated ssh prompts unavailable", "error", err)
+	} else {
+		app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
+			cleanup()
+			return nil
+		})
+	}
 
 	// Initialize clipboard support. This is best-effort; if it fails
 	// (e.g., headless environment), clipboard operations will return nil.
@@ -178,6 +235,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	if err != nil {
 		slog.Warn("Failed to list disabled MCP overrides; starting them anyway", "error", err)
 	}
+	// MCP clients are process-global and a server hosts one app per
+	// workspace, so hold a reference that keeps another app's shutdown from
+	// closing them. The mcp.Close cleanup below releases it.
+	mcp.Acquire()
 	go mcp.Initialize(ctx, app.Permissions, store, forceStart, localDisabled)
 
 	// Start herdr integration when running inside a herdr pane.
@@ -204,6 +265,10 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 		return app, nil
 	}
 	if err := app.InitCoderAgent(ctx); err != nil {
+		// A failed app is never shut down, so release its MCP reference.
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = mcp.Close(closeCtx)
+		cancel()
 		return nil, fmt.Errorf("failed to initialize coder agent: %w", err)
 	}
 	go app.refreshDiscoveredModels(ctx, app.AgentCoordinator)
@@ -258,6 +323,13 @@ func (app *App) Events(ctx context.Context) <-chan pubsub.Event[tea.Msg] {
 	return app.events.Subscribe(ctx)
 }
 
+// EventsWithOverflow is like [App.Events], but also returns a channel that
+// is closed the first time an event is dropped for this caller because it
+// fell behind. See [pubsub.Broker.SubscribeWithOverflow].
+func (app *App) EventsWithOverflow(ctx context.Context) (<-chan pubsub.Event[tea.Msg], <-chan struct{}) {
+	return app.events.SubscribeWithOverflow(ctx)
+}
+
 // SendEvent publishes a message to all event subscribers.
 func (app *App) SendEvent(msg tea.Msg) {
 	app.events.Publish(pubsub.UpdatedEvent, msg)
@@ -290,6 +362,14 @@ func (app *App) ReportCurrentSession(sessionID string) {
 // given prompt, printing to stdout.
 func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt, largeModel, smallModel, reasoningEffort string, hideSpinner bool, continueSessionID string, useLast bool) error {
 	slog.Info("Running in non-interactive mode")
+
+	// No dialog can answer an integrated pinentry prompt here, so GPG
+	// would wait forever: let the agent's own pinentry ask instead.
+	pinentry.DisableIntegration()
+
+	// No dialog can answer an ssh prompt here, so ssh would wait forever:
+	// let it fail instead.
+	sshaskpass.DisableIntegration()
 
 	// Re-initialize the coder agent without interactive-only tools.
 	if err := app.InitCoderAgentNonInteractive(ctx); err != nil {
@@ -363,7 +443,7 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 	}
 
 	// force update of agent models before running so mcp tools are loaded
-	app.AgentCoordinator.UpdateModels(ctx)
+	app.Agent().UpdateModels(ctx)
 
 	defer stopSpinner()
 
@@ -399,28 +479,26 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 	// Report session identity to herdr.
 	app.ReportCurrentSession(sess.ID)
 
-	type response struct {
-		result *fantasy.AgentResult
-		err    error
+	answer, err := newAnswerPrinter(ctx, output, sess.ID, app.Messages, continueSessionID != "" || useLast)
+	if err != nil {
+		return err
 	}
-	done := make(chan response, 1)
 
+	// Subscribe before the agent starts, so no update is published before
+	// anyone listens.
+	subCtx, cancelSub := context.WithCancel(ctx)
+	defer cancelSub()
+	messageEvents := app.Messages.Subscribe(subCtx)
+
+	done := make(chan error, 1)
+	coord := app.Agent()
 	go func(ctx context.Context, sessionID, prompt string) {
-		result, err := app.AgentCoordinator.Run(ctx, sess.ID, prompt)
-		if err != nil {
-			done <- response{
-				err: fmt.Errorf("failed to start agent processing stream: %w", err),
-			}
+		if _, err := coord.Run(ctx, sessionID, prompt); err != nil {
+			done <- fmt.Errorf("failed to start agent processing stream: %w", err)
 			return
 		}
-		done <- response{
-			result: result,
-		}
+		done <- nil
 	}(ctx, sess.ID, prompt)
-
-	messageEvents := app.Messages.Subscribe(ctx)
-	messageReadBytes := make(map[string]int)
-	var printed bool
 
 	defer func() {
 		if progress && stderrTTY {
@@ -432,64 +510,22 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 		_, _ = fmt.Fprintln(output)
 	}()
 
-	for {
+	beforeWait := func() {
 		if progress && stderrTTY {
 			// HACK: Reinitialize the terminal progress bar on every iteration
 			// so it doesn't get hidden by the terminal due to inactivity.
 			_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
 		}
-
-		select {
-		case result := <-done:
-			stopSpinner()
-			if result.err != nil {
-				if errors.Is(result.err, context.Canceled) || errors.Is(result.err, agent.ErrRequestCancelled) {
-					slog.Debug("Non-interactive: agent processing cancelled", "session_id", sess.ID)
-					return nil
-				}
-				return fmt.Errorf("agent processing failed: %w", result.err)
-			}
-			return nil
-
-		case event := <-messageEvents:
-			msg := event.Payload
-			if msg.SessionID == sess.ID && msg.Role == message.Assistant && len(msg.Parts) > 0 {
-				stopSpinner()
-
-				content := msg.Content().String()
-				readBytes := messageReadBytes[msg.ID]
-
-				if len(content) < readBytes {
-					slog.Error("Non-interactive: message content is shorter than read bytes", "message_length", len(content), "read_bytes", readBytes)
-					return fmt.Errorf("message content is shorter than read bytes: %d < %d", len(content), readBytes)
-				}
-
-				part := content[readBytes:]
-				// Trim leading whitespace. Sometimes the LLM includes leading
-				// formatting and indentation, which we don't want here.
-				if readBytes == 0 {
-					part = strings.TrimLeft(part, " \t")
-				}
-				// Ignore initial whitespace-only messages.
-				if printed || strings.TrimSpace(part) != "" {
-					printed = true
-					fmt.Fprint(output, part)
-				}
-				messageReadBytes[msg.ID] = len(content)
-			}
-
-		case <-ctx.Done():
-			stopSpinner()
-			return ctx.Err()
-		}
 	}
+	return answer.printUntilDone(ctx, messageEvents, done, app.Messages, beforeWait, stopSpinner)
 }
 
 func (app *App) UpdateAgentModel(ctx context.Context) error {
-	if app.AgentCoordinator == nil {
+	coord := app.Agent()
+	if coord == nil {
 		return fmt.Errorf("agent configuration is missing")
 	}
-	return app.AgentCoordinator.UpdateModels(ctx)
+	return coord.UpdateModels(ctx)
 }
 
 // restoreModelFromSession reads the last assistant message in the
@@ -531,7 +567,7 @@ func (app *App) restoreModelFromSession(ctx context.Context, sessionID string) e
 		smallModel := app.GetDefaultSmallModel(lastMsg.Provider)
 		app.config.OverridePreferredModel(config.SelectedModelTypeSmall, smallModel)
 	}
-	if err := app.AgentCoordinator.UpdateModels(ctx); err != nil {
+	if err := app.Agent().UpdateModels(ctx); err != nil {
 		return fmt.Errorf("failed to update agent models: %w", err)
 	}
 	slog.Info("Restored model from session",
@@ -589,7 +625,7 @@ func (app *App) overrideModelsForNonInteractive(ctx context.Context, largeModel,
 		app.config.OverridePreferredModel(config.SelectedModelTypeSmall, smallCfg)
 	}
 
-	return app.AgentCoordinator.UpdateModels(ctx)
+	return app.Agent().UpdateModels(ctx)
 }
 
 // overrideReasoningEffort validates the requested reasoning effort against
@@ -611,7 +647,7 @@ func (app *App) overrideReasoningEffort(ctx context.Context, reasoningEffort str
 		"model", selected.Model,
 		"reasoning_effort", reasoningEffort)
 	app.config.OverridePreferredModel(config.SelectedModelTypeLarge, selected)
-	return app.AgentCoordinator.UpdateModels(ctx)
+	return app.Agent().UpdateModels(ctx)
 }
 
 // GetDefaultSmallModel returns the default small model for the given
@@ -722,12 +758,25 @@ func (app *App) setupEvents() {
 	app.subscribeMustDeliver(ctx, "permissions-notifications", app.Permissions.SubscribeNotifications)
 	app.subscribeMustDeliver(ctx, "question-batches", app.Questions.Subscribe)
 	app.subscribeMustDeliver(ctx, "question-notifications", app.Questions.SubscribeNotifications)
+	// SSH credential prompts hang a running ssh command if lost, so
+	// the fan-in must not drop them.
+	app.subscribeMustDeliver(ctx, "ssh-prompts", sshaskpass.DefaultPrompts().Subscribe)
+	app.subscribeMustDeliver(ctx, "ssh-notifications", sshaskpass.DefaultPrompts().SubscribeNotifications)
+	app.subscribeMustDeliver(ctx, "permissions-mode", app.Permissions.SubscribeModeChanges)
 	app.subscribe(ctx, "history", app.History.Subscribe)
 	app.subscribe(ctx, "agent-notifications", app.agentNotifications.Subscribe)
+	// Pinentry transitions are rare and drive the terminal handover, so
+	// they must not be dropped: a lost release/restore would leave the
+	// terminal in the wrong state. The same goes for integrated pinentry
+	// credential prompts, which hang a GPG command if lost.
+	app.subscribeMustDeliver(ctx, "pinentry", app.Pinentry.Subscribe)
+	app.subscribeMustDeliver(ctx, "pinentry-prompts", pinentry.DefaultPrompts().Subscribe)
+	app.subscribeMustDeliver(ctx, "pinentry-notifications", pinentry.DefaultPrompts().SubscribeNotifications)
 	app.subscribeMustDeliver(ctx, "run-completions", app.runCompletions.Subscribe)
 	app.subscribe(ctx, "mcp", mcp.SubscribeEvents)
 	app.subscribe(ctx, "mcp-channels", app.subscribeScopedChannelEvents)
 	app.subscribe(ctx, "lsp", SubscribeLSPEvents)
+	app.subscribe(ctx, "tool-progress", app.toolProgress.Subscribe)
 	if app.Skills != nil {
 		app.subscribe(ctx, "skills", app.Skills.SubscribeEvents)
 	}
@@ -771,11 +820,32 @@ func (app *App) subscribeScopedChannelEvents(ctx context.Context) <-chan pubsub.
 	return scoped
 }
 
+// eventCoalesceKey keeps at most one pending message or tool-progress
+// update per item for each slow app.events subscriber.
+func eventCoalesceKey(ev pubsub.Event[tea.Msg]) string {
+	switch e := ev.Payload.(type) {
+	case pubsub.Event[message.Message]:
+		if k := message.CoalesceKey(e); k != "" {
+			return "msg:" + k
+		}
+	case pubsub.Event[tools.ToolProgress]:
+		if k := toolProgressCoalesceKey(e); k != "" {
+			return "tool-progress:" + k
+		}
+	}
+	return ""
+}
+
+func toolProgressCoalesceKey(ev pubsub.Event[tools.ToolProgress]) string {
+	return ev.Payload.ToolCallID
+}
+
 // subscribe fans a service's event stream into the shared app.events
 // broker on app.serviceEventsWG, re-publishing each upstream event as a
-// tea.Msg. The goroutine exits when ctx is cancelled or the upstream
-// channel closes. It is a generic method (Go 1.27) so it can live in the
-// App namespace while still inferring the upstream event type T.
+// tea.Msg. Upstream must-deliver events stay must-deliver. The goroutine
+// exits when ctx is cancelled or the upstream channel closes. It is a
+// generic method (Go 1.27) so it can live in the App namespace while still
+// inferring the upstream event type T.
 func (app *App) subscribe[T any](
 	ctx context.Context,
 	name string,
@@ -790,7 +860,11 @@ func (app *App) subscribe[T any](
 					slog.Debug("Subscription channel closed", "name", name)
 					return
 				}
-				app.events.Publish(pubsub.UpdatedEvent, tea.Msg(event))
+				if event.MustDeliver {
+					app.events.PublishMustDeliver(ctx, pubsub.UpdatedEvent, tea.Msg(event))
+				} else {
+					app.events.Publish(pubsub.UpdatedEvent, tea.Msg(event))
+				}
 			case <-ctx.Done():
 				slog.Debug("Subscription cancelled", "name", name)
 				return
@@ -839,32 +913,74 @@ func (app *App) InitCoderAgentNonInteractive(ctx context.Context) error {
 	return app.initCoderAgent(ctx, false)
 }
 
+// initCoderAgent builds the workspace's coder coordinator. It is
+// create-only: once a coordinator exists the call is a no-op, so a
+// channel push initializing the agent headlessly cannot race a client
+// attach into building a second coordinator. The one refinement is an
+// upgrade: an interactive initializer replaces a coordinator that was
+// built headlessly, so an attached client regains the interactive-only
+// tools (notably question). A downgrade or a re-init while a run is in
+// flight keeps the existing coordinator, because swapping it then
+// would strand the run.
 func (app *App) initCoderAgent(ctx context.Context, interactive bool) error {
+	app.agentInitMu.Lock()
+	defer app.agentInitMu.Unlock()
+	if app.AgentCoordinator != nil {
+		if !interactive || app.agentInteractive {
+			return nil
+		}
+		if app.AgentCoordinator.IsBusy() {
+			slog.Warn("Keeping headless coder agent: interactive init raced a running turn")
+			return nil
+		}
+		// Interactive upgrade: the headless coordinator is swapped out
+		// below. Cancel anything it still has in flight (the IsBusy
+		// check above covers the common case, but a channel push can
+		// start a run between the check and the swap, and nothing
+		// reaches the old coordinator afterwards).
+		app.AgentCoordinator.CancelAll()
+	}
 	coderAgentCfg := app.config.Config().Agents[config.AgentCoder]
 	if coderAgentCfg.ID == "" {
 		return fmt.Errorf("coder agent configuration is missing")
 	}
-	var err error
-	app.AgentCoordinator, err = agent.NewCoordinator(ctx, agent.CoordinatorOptions{
-		Config:      app.config,
-		Sessions:    app.Sessions,
-		Messages:    app.Messages,
-		Permissions: app.Permissions,
-		Questions:   app.Questions,
-		History:     app.History,
-		FileTracker: app.FileTracker,
-		LSPManager:  app.LSPManager,
-		Notify:      app.agentNotifications,
-		RunComplete: app.runCompletions,
-		Skills:      app.Skills,
-		HookRunner:  app.hookRunner,
-		Interactive: interactive,
+	coord, err := agent.NewCoordinator(ctx, agent.CoordinatorOptions{
+		Config:       app.config,
+		Sessions:     app.Sessions,
+		Messages:     app.Messages,
+		Permissions:  app.Permissions,
+		Questions:    app.Questions,
+		History:      app.History,
+		FileTracker:  app.FileTracker,
+		LSPManager:   app.LSPManager,
+		Notify:       app.agentNotifications,
+		RunComplete:  app.runCompletions,
+		ToolProgress: app.toolProgress,
+		Skills:       app.Skills,
+		HookRunner:   app.hookRunner,
+		Interactive:  interactive,
+		ShellOwner:   app,
 	})
 	if err != nil {
 		slog.Error("Failed to create coder agent", "err", err)
 		return err
 	}
+	app.AgentCoordinator = coord
+	app.agentInteractive = interactive
 	return nil
+}
+
+// agentCoordinator returns the current coder coordinator under the init
+// lock. Every reader of the AgentCoordinator field goes through here,
+// so an interactive upgrade replacing a headless coordinator cannot
+// race a dispatch into calling methods on a half-replaced value. The
+// returned coordinator may be swapped for a newer one right after the
+// call; a superseded coordinator has been cancelled and is safe to
+// finish calls on.
+func (app *App) Agent() agent.Coordinator {
+	app.agentInitMu.Lock()
+	defer app.agentInitMu.Unlock()
+	return app.AgentCoordinator
 }
 
 // Subscribe sends events to the TUI as tea.Msgs.
@@ -907,8 +1023,8 @@ func (app *App) Shutdown() {
 
 	// First, cancel all agents and wait for them to finish. This must complete
 	// before closing the DB so agents can finish writing their state.
-	if app.AgentCoordinator != nil {
-		app.AgentCoordinator.CancelAll()
+	if coord := app.Agent(); coord != nil {
+		coord.CancelAll()
 	}
 	app.fireSessionEnd()
 
@@ -934,9 +1050,11 @@ func (app *App) Shutdown() {
 		event.AppExited()
 	})
 
-	// Kill all background shells.
+	// Kill the background shells this app started. The shell manager is
+	// shared by the whole process, and the server hosts one app per
+	// workspace, so other workspaces' shells must keep running.
 	wg.Go(func() {
-		shell.GetBackgroundShellManager().KillAll(shutdownCtx)
+		shell.GetBackgroundShellManager().KillOwned(shutdownCtx, app)
 	})
 
 	// Close herdr client to stop its background writer.

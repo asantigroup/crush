@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/permission"
 	"github.com/charmbracelet/crush/internal/pubsub"
@@ -29,14 +28,15 @@ import (
 // tear down the fan-in goroutines and the events broker.
 func NewForTest(ctx context.Context) *App {
 	app := &App{
-		Permissions:        permission.NewPermissionService("", false, nil, nil),
+		Permissions:        permission.NewPermissionService("", nil, nil),
 		Questions:          question.NewService(),
 		globalCtx:          ctx,
-		events:             pubsub.NewBroker[tea.Msg](),
+		events:             pubsub.NewCoalescingBroker(eventCoalesceKey),
 		serviceEventsWG:    &sync.WaitGroup{},
 		tuiWG:              &sync.WaitGroup{},
 		agentNotifications: pubsub.NewBroker[notify.Notification](),
 		runCompletions:     pubsub.NewBroker[notify.RunComplete](),
+		toolProgress:       pubsub.NewCoalescingBroker(toolProgressCoalesceKey),
 	}
 
 	eventsCtx, cancel := context.WithCancel(ctx)
@@ -53,6 +53,8 @@ func NewForTest(ctx context.Context) *App {
 		app.agentNotifications.Subscribe)
 	app.subscribe(eventsCtx, "run-completions",
 		app.runCompletions.Subscribe)
+	app.subscribe(eventsCtx, "tool-progress",
+		app.toolProgress.Subscribe)
 	app.cleanupFuncs = append(app.cleanupFuncs, func(context.Context) error {
 		cancel()
 		app.serviceEventsWG.Wait()
